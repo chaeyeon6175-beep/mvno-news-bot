@@ -9,8 +9,8 @@ NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
 NOTION_DB_ID = os.environ.get('NOTION_DB_ID')
 
 def get_naver_news(keyword):
-    # display=5로 설정하여 각 키워드당 최소 5개씩 가져옵니다.
-    url = f"https://openapi.naver.com/v1/search/news.json?query={keyword}&display=5&sort=sim"
+    # 각 키워드당 10개를 검색해서 그 중 상위 5개를 추출 (중복 대비 여유있게 수집)
+    url = f"https://openapi.naver.com/v1/search/news.json?query={keyword}&display=10&sort=sim"
     headers = {
         "X-Naver-Client-Id": NAVER_CLIENT_ID,
         "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
@@ -19,7 +19,7 @@ def get_naver_news(keyword):
         res = requests.get(url, headers=headers)
         return res.json().get('items', [])
     except Exception as e:
-        print(f"Error fetching news for {keyword}: {e}")
+        print(f"Error: {e}")
         return []
 
 def add_to_notion(title, link, pub_date, keyword_tag):
@@ -30,9 +30,12 @@ def add_to_notion(title, link, pub_date, keyword_tag):
         "Notion-Version": "2022-06-28"
     }
     
+    # 이모지 설정 (키워드에 따라 다르게)
+    emoji = "🏢" if "SK텔링크" in keyword_tag else "📰"
+    
     data = {
         "parent": {"database_id": NOTION_DB_ID},
-        "icon": {"emoji": "🏢"}, # 기업 관련 뉴스는 빌딩 아이콘
+        "icon": {"emoji": emoji},
         "properties": {
             "제목": {"title": [{"text": {"content": title}}]},
             "링크": {"url": link},
@@ -40,26 +43,34 @@ def add_to_notion(title, link, pub_date, keyword_tag):
             "분류": {"multi_select": [{"name": keyword_tag}]}
         }
     }
-    
-    res = requests.post(url, headers=headers, json=data)
-    if res.status_code == 200:
-        print(f"성공: {title} [{keyword_tag}]")
-    else:
-        print(f"실패: {res.status_code}")
+    requests.post(url, headers=headers, json=data)
 
 if __name__ == "__main__":
-    # 검색 대상 리스트 (키워드, 태그이름)
-    # SK텔링크와 텔링크를 추가했습니다.
     search_targets = [
         ("SK텔링크", "SK텔링크"),
         ("텔링크", "SK텔링크"),
         ("알뜰폰 요금제", "요금제현황"),
-        ("MVNO 점유율", "시장동향")
+        ("과기부 알뜰폰 정책", "정부정책"),
+        ("MVNO 시장 점유율", "시장동향")
     ]
+    
+    processed_links = set() # 이번 실행에서 처리된 링크 저장 (중복 방지)
     
     for kw, tag in search_targets:
         news_items = get_naver_news(kw)
+        count = 0
         for item in news_items:
+            if count >= 5: break # 키워드당 5개까지만
+            
+            link = item['originallink'] or item['link']
+            
+            # 1. 이번 실행 내 중복 제거
+            if link in processed_links:
+                continue
+                
             clean_title = item['title'].replace('<b>', '').replace('</b>', '').replace('&quot;', '"').replace('&apos;', "'")
-            # 노션에 추가
-            add_to_notion(clean_title, item['originallink'], item['pubDate'], tag)
+            
+            add_to_notion(clean_title, link, item['pubDate'], tag)
+            processed_links.add(link)
+            count += 1
+            print(f"추가됨: {clean_title[:30]}...")
