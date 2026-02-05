@@ -2,14 +2,14 @@ import os
 import requests
 from datetime import datetime
 
-# 환경 변수 로드
+# 1. 환경 변수 로드 (GitHub Secrets에 등록된 정보)
 NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET')
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
 NOTION_DB_ID = os.environ.get('NOTION_DB_ID')
 
 def get_naver_news(keyword):
-    # 여유 있게 10개를 가져와서 중복을 거릅니다.
+    """네이버 뉴스 API를 통해 키워드 검색 결과를 가져옵니다."""
     url = f"https://openapi.naver.com/v1/search/news.json?query={keyword}&display=10&sort=sim"
     headers = {
         "X-Naver-Client-Id": NAVER_CLIENT_ID,
@@ -22,6 +22,7 @@ def get_naver_news(keyword):
         return []
 
 def add_to_notion(title, link, pub_date, keyword_tag, desc):
+    """노션 데이터베이스에 새로운 페이지(뉴스 카드)를 생성합니다."""
     url = "https://api.notion.com/v1/pages"
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -29,14 +30,27 @@ def add_to_notion(title, link, pub_date, keyword_tag, desc):
         "Notion-Version": "2022-06-28"
     }
     
-    emoji = "🏢" if "SK텔링크" in keyword_tag else "📰"
+    # 전략: 키워드별로 다른 커버 이미지를 삽입하여 갤러리 뷰 가독성 향상
+    if "SK텔링크" in keyword_tag:
+        # SK텔링크 관련 비즈니스 이미지 (Unsplash)
+        img_url = "https://images.unsplash.com/photo-1573163281530-5be9c2960d37?q=80&w=2069&auto=format&fit=crop"
+        emoji = "🏢"
+    elif "요금제" in keyword_tag:
+        # 요금제/금융 관련 이미지
+        img_url = "https://images.unsplash.com/photo-1554224155-6726b3ff858f?q=80&w=2011&auto=format&fit=crop"
+        emoji = "💰"
+    else:
+        # 일반 뉴스 이미지
+        img_url = "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=2070&auto=format&fit=crop"
+        emoji = "📰"
     
     data = {
         "parent": {"database_id": NOTION_DB_ID},
+        "cover": {"type": "external", "external": {"url": img_url}}, # 갤러리 이미지용 커버
         "icon": {"emoji": emoji},
         "properties": {
             "제목": {
-                "title": [{"text": {"content": title, "link": {"url": link}}}] # 제목에 링크 삽입
+                "title": [{"text": {"content": title, "link": {"url": link}}}] # 제목 클릭 시 기사 이동
             },
             "요약": {
                 "rich_text": [{"text": {"content": desc}}]
@@ -49,33 +63,4 @@ def add_to_notion(title, link, pub_date, keyword_tag, desc):
             }
         }
     }
-    requests.post(url, headers=headers, json=data)
-
-if __name__ == "__main__":
-    search_targets = [
-        ("SK텔링크", "SK텔링크"),
-        ("텔링크", "SK텔링크"),
-        ("알뜰폰 요금제", "요금제현황"),
-        ("MVNO 시장 점유율", "시장동향")
-    ]
-    
-    processed_links = set() # 실행 중 중복 제거용
-    
-    for kw, tag in search_targets:
-        news_items = get_naver_news(kw)
-        count = 0
-        for item in news_items:
-            if count >= 5: break
-            
-            link = item['originallink'] or item['link']
-            if link in processed_links: continue
-            
-            # 텍스트 정리
-            clean_title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
-            clean_desc = item['description'].replace('<b>','').replace('</b>','').replace('&quot;','"')[:100] + "..."
-            
-            add_to_notion(clean_title, link, item['pubDate'], tag, clean_desc)
-            processed_links.add(link)
-            count += 1
-
-    print(f"작업 완료: {datetime.now()}")
+    requests.post(url, headers=headers
