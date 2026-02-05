@@ -1,9 +1,9 @@
-name: Daily News Clipping
+name: Update Notion News
 
 on:
+  workflow_dispatch:      # 수동 실행
   schedule:
-    - cron: '0 0 * * *' # 한국 시간(KST) 오전 9시 (UTC 00:00)
-  workflow_dispatch: # 수동 실행 버튼 활성화
+    - cron: '0 0 * * *'   # 매일 자정 실행 (필요시 조정)
 
 jobs:
   build:
@@ -18,9 +18,11 @@ jobs:
           python-version: '3.9'
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4  # 여기서 직접 설치하도록 명시!
 
-      - name: Run Script
+      - name: Run script
         env:
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
