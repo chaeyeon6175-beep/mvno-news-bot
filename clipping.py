@@ -16,13 +16,14 @@ HEADERS = {
 }
 
 def clear_database(db_id):
-    """기존 데이터를 모두 삭제(아카이브)"""
+    """기존 데이터를 모두 삭제(아카이브)합니다."""
     query_url = f"https://api.notion.com/v1/databases/{db_id}/query"
     res = requests.post(query_url, headers=HEADERS)
     if res.status_code == 200:
         pages = res.json().get("results", [])
         for page in pages:
-            requests.patch(f"https://api.notion.com/v1/pages/{page['id']}", headers=HEADERS, json={"archived": True})
+            page_id = page["id"]
+            requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=HEADERS, json={"archived": True})
 
 def get_img(url):
     try:
@@ -60,23 +61,18 @@ if __name__ == "__main__":
     ]
     
     for task in search_tasks:
-        clear_database(task['target_db']) # 기존 기사 삭제
+        # 1. 기존 뉴스 삭제
+        clear_database(task['target_db'])
         
-        # 중복 방지를 위한 세트와 결과 리스트
-        seen_titles = set()
-        final_items = []
-        
-        # 중복 제외 15개를 채우기 위해 넉넉히 50개 검색
-        res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={task['kw']}&display=50&sort=sim", 
+        # 2. 새로운 뉴스 수집
+        res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={task['kw']}&display=8", 
                            headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
         
         if res.status_code == 200:
-            items = res.json().get('items', [])
-            for item in items:
+            for item in res.json().get('items', []):
+                link = item['originallink'] or item['link']
                 title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
-                # 제목 앞 15자리가 같으면 중복으로 간주 (유사 기사 방지)
-                short_title = title[:15]
-                
-                if short_title not in seen_titles:
-                    seen_titles.add(short_title)
-                    final_items.append(item
+                img = get_img(link)
+                post_notion(task['target_db'], title, link, item['pubDate'], img)
+
+    print(f"새 뉴스 업데이트 완료: {datetime.now()}")
