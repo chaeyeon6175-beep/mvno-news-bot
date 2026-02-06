@@ -6,10 +6,10 @@ from bs4 import BeautifulSoup
 NAVER_ID = os.environ.get('NAVER_CLIENT_ID')
 NAVER_SECRET = os.environ.get('NAVER_CLIENT_SECRET')
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
-DB_ID = os.environ.get('NOTION_DB_ID')
+DB_ID_SK = os.environ.get('DB_ID_SK')
+DB_ID_TREND = os.environ.get('DB_ID_TREND')
 
 def get_img(url):
-    """기사 원문에서 이미지를 긁어옵니다."""
     try:
         res = requests.get(url, headers={'User-Agent':'Mozilla/5.0'}, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -18,40 +18,59 @@ def get_img(url):
     except:
         return "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000"
 
-def post_notion(title, link, date, tag, img):
-    """노션에 데이터를 전송합니다."""
+def format_date(date_str):
+    """네이버 날짜 형식을 '2024년 05월 20일' 형식으로 변환"""
+    try:
+        # 네이버 pubDate: 'Mon, 20 May 2024 10:00:00 +0900'
+        temp_date = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S +0900')
+        return temp_date.strftime('%Y년 %m월 %d일')
+    except:
+        return datetime.now().strftime('%Y년 %m월 %d일')
+
+def post_notion(db_id, title, link, date_str, img):
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
+    
+    clean_date = format_date(date_str)
+    
     data = {
-        "parent": {"database_id": DB_ID},
-        "cover": {"type": "external", "external": {"url": img}}, # 사진 핵심!
+        "parent": {"database_id": db_id},
+        "cover": {"type": "external", "external": {"url": img}},
         "properties": {
-            "제목": {"title": [{"text": {"content": title}}]},
-            "분류": {"multi_select": [{"name": tag}]},
-            "링크": {"url": link},
-            "날짜": {"rich_text": [{"text": {"content": date}}]}
+            "제목": {
+                "title": [
+                    {
+                        "text": {
+                            "content": title,
+                            "link": {"url": link} # 제목 자체에 하이퍼링크 삽입
+                        }
+                    }
+                ]
+            },
+            "날짜": {"rich_text": [{"text": {"content": clean_date}}]}
         }
     }
     requests.post("https://api.notion.com/v1/pages", headers=headers, json=data)
 
 if __name__ == "__main__":
-    # 검색 키워드와 분류 설정
-    targets = [("SK텔링크", "SK텔링크"), ("알뜰폰 요금제", "시장및요금제동향")]
+    search_tasks = [
+        {"kw": "SK텔링크", "target_db": DB_ID_SK},
+        {"kw": "알뜰폰 요금제", "target_db": DB_ID_TREND}
+    ]
     
-    for kw, tag in targets:
-        res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={kw}&display=5", 
+    for task in search_tasks:
+        res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={task['kw']}&display=8", 
                            headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
         
         if res.status_code == 200:
             items = res.json().get('items', [])
             for item in items:
                 link = item['originallink'] or item['link']
-                # 제목에서 HTML 태그 제거
                 title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
                 img = get_img(link)
-                post_notion(title, link, item['pubDate'], tag, img)
+                post_notion(task['target_db'], title, link, item['pubDate'], img)
 
     print(f"작업 완료: {datetime.now()}")
