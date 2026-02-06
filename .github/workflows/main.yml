@@ -1,31 +1,26 @@
-name: Update Notion News
-
+name: clipping
 on:
   schedule:
-    - cron: '0 0 * * *'  # 한국 시간 매일 오전 9시 (UTC 00:00)
-  workflow_dispatch:      # 수동 실행 버튼도 유지
+    - cron: '0 0 * * *'  # 한국 시간 매일 오전 9시 정각 실행
+  workflow_dispatch:      # 수동 실행 버튼
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
+      - uses: actions/checkout@v3
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4  # 여기서 직접 설치하도록 명시!
-
+          pip install requests beautifulsoup4
       - name: Run script
         env:
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+          DB_ID_SK: ${{ secrets.DB_ID_SK }}
+          DB_ID_TREND: ${{ secrets.DB_ID_TREND }}
         run: python clipping.py
