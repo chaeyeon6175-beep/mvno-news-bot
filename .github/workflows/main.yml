@@ -1,9 +1,9 @@
 name: Update Notion News
 
 on:
-  workflow_dispatch:      # 수동 실행
   schedule:
-    - cron: '0 0 * * *'   # 매일 자정 실행 (필요시 조정)
+    - cron: '0 0 * * *'  # 한국 시간 매일 오전 9시 (UTC 00:00)
+  workflow_dispatch:      # 수동 실행 버튼도 유지
 
 jobs:
   build:
