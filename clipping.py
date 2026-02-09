@@ -92,3 +92,29 @@ def collect_news(query, limit, db_id, tag_name, seen_titles):
     return count
 
 if __name__ == "__main__":
+    for d_id in DB_IDS.values():
+        if d_id: clear_database(d_id)
+
+    global_seen_titles = set()
+
+    # 1. MNO 시장 (각 10개씩)
+    mno_tasks = [
+        ("SK텔레콤", 10, "SKT"),
+        ("KT", 10, "KT"),
+        ("LG유플러스", 10, "LGU+"),
+        ("통신 3사", 10, "통신 3사")
+    ]
+    for q, lim, tag in mno_tasks:
+        collect_news(q, lim, DB_IDS["MNO"], tag, global_seen_titles)
+
+    # 2. MVNO 자회사 (각 8개씩)
+    for kw in ["SK텔링크", "KT M모바일", "KT스카이라이프", "LG헬로비전", "미디어로그"]:
+        collect_news(kw, 8, DB_IDS["SUBSID"], kw, global_seen_titles)
+
+    # 3. MVNO 금융 (각 8개씩)
+    for kw in ["KB 리브모바일", "토스모바일", "우리원모바일"]:
+        collect_news(kw, 8, DB_IDS["FIN"], kw, global_seen_titles)
+
+    # 4. 중소사업자 (각 8개씩)
+    for kw in ["아이즈모바일", "프리텔레콤", "에넥스텔레콤", "인스모바일"]:
+        collect_news(kw, 8, DB_IDS["SMALL"], kw, global_seen_titles)
