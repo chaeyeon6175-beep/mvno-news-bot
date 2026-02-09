@@ -1,5 +1,5 @@
 import os, requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from bs4 import BeautifulSoup
 
 # 환경 변수 로드
@@ -18,7 +18,6 @@ HEADERS = {
 }
 
 def clear_database(db_id):
-    """기존 뉴스 삭제(아카이브)"""
     query_url = f"https://api.notion.com/v1/databases/{db_id}/query"
     res = requests.post(query_url, headers=HEADERS)
     if res.status_code == 200:
@@ -34,16 +33,8 @@ def get_img(url):
     except:
         return "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000"
 
-def format_date(date_str):
-    """네이버 pubDate를 '2026년 02월 09일' 형식으로 변환"""
-    try:
-        temp_date = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S +0900')
-        return temp_date.strftime('%Y년 %m월 %d일')
-    except:
-        return datetime.now().strftime('%Y년 %m월 %d일')
-
 def post_notion(db_id, title, link, date_str, img, tag=None):
-    clean_date = format_date(date_str)
+    clean_date = datetime.now().strftime('%Y년 %m월 %d일')
     props = {
         "제목": {"title": [{"text": {"content": title, "link": {"url": link}}}]},
         "날짜": {"rich_text": [{"text": {"content": clean_date}}]},
@@ -52,62 +43,62 @@ def post_notion(db_id, title, link, date_str, img, tag=None):
     if tag:
         props["분류"] = {"multi_select": [{"name": tag}]}
         
-    data = {
-        "parent": {"database_id": db_id},
-        "cover": {"type": "external", "external": {"url": img}},
-        "properties": props
-    }
-    return requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
+    data = {"parent": {"database_id": db_id}, "cover": {"type": "external", "external": {"url": img}}, "properties": props}
+    requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
 
-def crawl_and_post(kw, db_id, tag=None):
+def crawl_and_post(kw_list, db_id, category_map=None, strict=False):
     seen_titles = set()
-    final_items = []
+    final_count = 0
     
-    # 1. 최신순으로 넉넉히 50개 검색 (오늘 + 어제 기사가 포함되도록)
-    res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={kw}&display=50&sort=date", 
-                       headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
-    
-    if res.status_code == 200:
-        items = res.json().get('items', [])
-        for item in items:
-            title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
-            short_title = title[:15] # 중복 방지를 위해 앞 15자 비교
-            
-            if short_title not in seen_titles:
-                seen_titles.add(short_title)
-                final_items.append(item)
-            
-            # 중복 제거 후 10개가 채워지면 중단
-            if len(final_items) >= 10:
-                break
+    for kw in kw_list:
+        if final_count >= 15: break # 각 DB당 최대 15개 내외 조절
         
-        # 2. 수집된 기사 노션에 전송
-        for item in final_items:
-            link = item['originallink'] or item['link']
-            title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
-            img = get_img(link)
-            post_notion(db_id, title, link, item['pubDate'], img, tag)
+        # 정확도를 높이기 위해 검색어에 쌍따옴표 추가 (네이버 상세검색 기능)
+        search_query = f'"{kw}"'
+        res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={search_query}&display=30&sort=date", 
+                           headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
         
-        print(f"[{kw}] 총 {len(final_items)}개 기사 업데이트 완료.")
+        if res.status_code == 200:
+            for item in res.json().get('items', []):
+                title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
+                
+                # [필터링 로직] 제목에 키워드가 실제로 포함되어 있는지 확인 (strict 모드)
+                if strict and not any(k.lower() in title.lower() for k in [kw]):
+                    continue
+                
+                if title[:15] not in seen_titles:
+                    seen_titles.add(title[:15])
+                    
+                    # [MNO 특수 분류]
+                    tag = None
+                    if category_map:
+                        # 통신3사 통합 키워드 우선 체크
+                        if any(x in title for x in ["통신 3사", "통신3사", "이통3사", "SKT·KT·LGU+"]):
+                            tag = "통신 3사"
+                        else:
+                            tag = category_map.get(kw, "기타")
+                    
+                    img = get_img(item['originallink'] or item['link'])
+                    post_notion(db_id, title, item['originallink'] or item['link'], item['pubDate'], img, tag)
+                    final_count += 1
+                if final_count >= 15: break
 
 if __name__ == "__main__":
-    # 모든 DB 청소 (어제 데이터 삭제)
     for d_id in [DB_ID_MNO, DB_ID_SUBSID, DB_ID_FIN, DB_ID_SMALL]:
         if d_id: clear_database(d_id)
 
-    # 1. MNO 시장
-    mno_kws = [("SKT", "SKT"), ("SK텔레콤", "SKT"), ("KT", "KT"), ("LG U+", "LGU+"), ("LG유플러스", "LGU+")]
-    for kw, tag in mno_kws:
-        crawl_and_post(kw, DB_ID_MNO, tag)
+    # 1. MNO 시장 (태그 맵핑)
+    mno_map = {"SKT":"SKT", "SK텔레콤":"SKT", "KT":"KT", "LG U+":"LGU+", "LG유플러스":"LGU+"}
+    crawl_and_post(list(mno_map.keys()), DB_ID_MNO, category_map=mno_map, strict=True)
 
-    # 2. MVNO 자회사
-    for kw in ["SK텔링크", "KT M모바일", "KT스카이라이프", "LG헬로비전", "미디어로그"]:
-        crawl_and_post(kw, DB_ID_SUBSID)
+    # 2. MVNO 자회사 (정확히 제목에 있는 것만)
+    subsid_kws = ["SK텔링크", "KT M모바일", "KT 엠모바일", "KT스카이라이프", "LG헬로비전", "미디어로그", "에스케이 SK텔링크"]
+    crawl_and_post(subsid_kws, DB_ID_SUBSID, strict=True)
 
     # 3. MVNO 금융
-    for kw in ["KB 리브모바일", "토스모바일", "우리원모바일"]:
-        crawl_and_post(kw, DB_ID_FIN)
+    fin_kws = ["KB 리브모바일", "토스모바일", "우리원모바일"]
+    crawl_and_post(fin_kws, DB_ID_FIN, strict=True)
 
-    # 4. 중소사업자
-    for kw in ["아이즈모바일", "프리텔레콤", "에넥스텔레콤"]:
-        crawl_and_post(kw, DB_ID_SMALL)
+    # 4. 중소사업자 (키워드 구체화하여 오인 수집 방지)
+    small_kws = ["아이즈모바일", "프리텔레콤", "에넥스텔레콤", "모바일실용주의", "헬로모바일"]
+    crawl_and_post(small_kws, DB_ID_SMALL, strict=True)
