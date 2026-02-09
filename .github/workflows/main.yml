@@ -1,7 +1,8 @@
 name: clipping
+
 on:
   schedule:
-    - cron: '0 0 * * *'  # 한국 시간 매일 오전 9시 정각 실행
+    - cron: '0 0 * * *'  # 한국 시간 매일 오전 9시 (UTC 00:00)
   workflow_dispatch:      # 수동 실행 버튼
 
 jobs:
@@ -9,18 +10,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install dependencies
         run: |
           pip install requests beautifulsoup4
+
       - name: Run script
         env:
+          # 네이버 API 및 노션 토큰
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          DB_ID_SK: ${{ secrets.DB_ID_SK }}
-          DB_ID_TREND: ${{ secrets.DB_ID_TREND }}
+          
+          # 새롭게 추가된 4개의 데이터베이스 ID
+          DB_ID_MNO: ${{ secrets.DB_ID_MNO }}
+          DB_ID_SUBSID: ${{ secrets.DB_ID_SUBSID }}
+          DB_ID_FIN: ${{ secrets.DB_ID_FIN }}
+          DB_ID_SMALL: ${{ secrets.DB_ID_SMALL }}
         run: python clipping.py
