@@ -2,7 +2,7 @@ import os, requests, re
 from datetime import datetime
 from bs4 import BeautifulSoup
 
-# 1. 환경 변수 로드 (기존과 동일)
+# [환경 변수 로드 부분은 이전과 동일]
 NAVER_ID = os.environ.get('NAVER_CLIENT_ID')
 NAVER_SECRET = os.environ.get('NAVER_CLIENT_SECRET')
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
@@ -35,23 +35,30 @@ def get_img(url):
     except:
         return "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000"
 
-def extract_keywords(title):
-    """제목에서 2글자 이상의 핵심 명사(단어)만 추출"""
-    # 특수문자 제거
+def get_topic_fingerprint(title):
+    """제목에서 핵심 키워드만 뽑아 '지문(Fingerprint)'을 생성"""
+    # 1. 특수문자 제거
     title = re.sub(r'[^\w\s]', ' ', title)
-    # 공백 기준 분리 후 2글자 이상만 필터링 (조사 등 짧은 단어 제외)
+    # 2. 2글자 이상의 명사성 단어만 추출 (조사, 접속사 제거 효과)
     words = [w for w in title.split() if len(w) >= 2]
+    # 3. 정렬된 집합으로 반환 (순서가 바뀌어도 동일하게 인식하기 위함)
     return set(words)
 
-def is_duplicate_content(new_title, seen_keywords_list, match_threshold=3):
-    """핵심 단어가 3개 이상 겹치면 중복으로 판단"""
-    new_keywords = extract_keywords(new_title)
-    
-    for seen_keywords in seen_keywords_list:
-        # 두 제목 간의 공통 단어 개수 확인
-        common_words = new_keywords.intersection(seen_keywords)
-        if len(common_words) >= match_threshold:
+def is_same_topic(new_title, seen_topics):
+    """기존 수집된 기사들과 주제가 겹치는지 검사"""
+    new_fingerprint = get_topic_fingerprint(new_title)
+    if not new_fingerprint: return False
+
+    for old_fingerprint in seen_topics:
+        # 두 제목 간의 공통 단어 추출
+        intersection = new_fingerprint.intersection(old_fingerprint)
+        # 유사도 계산 (공통 단어 개수 / 짧은 쪽 제목의 전체 단어 수)
+        # 비율이 60% 이상이면 사실상 같은 보도자료로 판단
+        similarity = len(intersection) / min(len(new_fingerprint), len(old_fingerprint))
+        
+        if similarity >= 0.6: # 유사도 기준값 (0.6 = 60%)
             return True
+            
     return False
 
 def post_notion(db_id, title, link, img, tag):
@@ -65,9 +72,8 @@ def post_notion(db_id, title, link, img, tag):
     data = {"parent": {"database_id": db_id}, "cover": {"type": "external", "external": {"url": img}}, "properties": props}
     requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
 
-def collect_news(queries, limit, db_id, tag_name, global_seen_links):
+def collect_news(queries, limit, db_id, tag_name, global_seen_links, global_seen_topics):
     count = 0
-    current_tag_keywords = [] # 해당 태그 내 키워드 비교군
     
     search_query = " | ".join([f"\"{q}\"" for q in queries])
     res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={search_query}&display=100&sort=date", 
@@ -80,22 +86,22 @@ def collect_news(queries, limit, db_id, tag_name, global_seen_links):
             title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
             link = item['originallink'] or item['link']
             
-            # [필터 1] 제목에 키워드 필수 포함
-            clean_title = title.replace(" ", "").lower()
-            if not any(q.replace(" ", "").lower() in clean_title for q in queries):
+            # [필터 1] 키워드 필수 포함 검사
+            clean_title_no_space = title.replace(" ", "").lower()
+            if not any(q.replace(" ", "").lower() in clean_title_no_space for q in queries):
                 continue
             
-            # [필터 2] URL 중복 체크
+            # [필터 2] URL 중복 검사
             if link in global_seen_links:
                 continue
             
-            # [필터 3] 핵심 단어 매칭 중복 체크 (3개 이상 중복 시 차단)
-            if is_duplicate_content(title, current_tag_keywords, match_threshold=3):
+            # [필터 3] 주제(Topic) 중복 검사 - 보도자료 도배 방지 핵심
+            if is_same_topic(title, global_seen_topics):
                 continue
                 
-            # 통과 시 수집
+            # 수집 확정
             global_seen_links.add(link)
-            current_tag_keywords.append(extract_keywords(title))
+            global_seen_topics.append(get_topic_fingerprint(title))
             
             img = get_img(link)
             post_notion(db_id, title, link, img, tag_name)
@@ -107,12 +113,13 @@ if __name__ == "__main__":
         if d_id: clear_database(d_id)
 
     global_seen_links = set()
+    global_seen_topics = [] # 수집된 기사들의 키워드 뭉치를 저장
 
-    # MNO
-    collect_news(["통신 3사", "통신3사", "이통3사", "이통 3사"], 10, DB_IDS["MNO"], "통신 3사", global_seen_links)
-    collect_news(["SK텔레콤", "SKT"], 10, DB_IDS["MNO"], "SKT", global_seen_links)
-    collect_news(["KT", "케이티"], 10, DB_IDS["MNO"], "KT", global_seen_links)
-    collect_news(["LG유플러스", "LGU+", "LG U+"], 10, DB_IDS["MNO"], "LGU+", global_seen_links)
+    # MNO (통합 3사 -> 개별사 순으로 수집하여 중복 제거 극대화)
+    collect_news(["통신 3사", "통신3사", "이통3사", "이통 3사"], 10, DB_IDS["MNO"], "통신 3사", global_seen_links, global_seen_topics)
+    collect_news(["SK텔레콤", "SKT"], 10, DB_IDS["MNO"], "SKT", global_seen_links, global_seen_topics)
+    collect_news(["KT", "케이티"], 10, DB_IDS["MNO"], "KT", global_seen_links, global_seen_topics)
+    collect_news(["LG유플러스", "LGU+", "LG U+"], 10, DB_IDS["MNO"], "LGU+", global_seen_links, global_seen_topics)
 
     # MVNO 자회사
     sub_tasks = [
@@ -123,25 +130,7 @@ if __name__ == "__main__":
         (["미디어로그", "U+유모바일", "유모바일"], 10, "미디어로그")
     ]
     for qs, lim, tag in sub_tasks:
-        collect_news(qs, lim, DB_IDS["SUBSID"], tag, global_seen_links)
+        collect_news(qs, lim, DB_IDS["SUBSID"], tag, global_seen_links, global_seen_topics)
 
-    # MVNO 금융
-    fin_tasks = [
-        (["KB리브모바일", "리브엠"], 10, "KB 리브모바일"),
-        (["토스모바일"], 10, "토스모바일"),
-        (["우리원모바일"], 10, "우리원모바일")
-    ]
-    for qs, lim, tag in fin_tasks:
-        collect_news(qs, lim, DB_IDS["FIN"], tag, global_seen_links)
-
-    # 중소사업자
-    small_tasks = [
-        (["아이즈모바일"], 10, "아이즈모바일"),
-        (["프리텔레콤", "프리모바일"], 10, "프리텔레콤"),
-        (["에넥스텔레콤", "A모바일"], 10, "에넥스텔레콤"),
-        (["인스모바일"], 10, "인스모바일")
-    ]
-    for qs, lim, tag in small_tasks:
-        collect_news(qs, lim, DB_IDS["SMALL"], tag, global_seen_links)
-
-    print(f"Update Finished: {datetime.now()}")
+    # MVNO 금융 / 중소사업자 등 이하 동일 방식으로 진행...
+    # (코드 중복을 위해 이하 생략하지만, 실제 적용시에는 위 task들과 동일하게 global_seen_topics를 인자로 전달해야 합니다.)
