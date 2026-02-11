@@ -18,8 +18,14 @@ HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
+def clean_id(raw_id):
+    """ID에서 공백, 하이픈 등을 제거하여 순수 32자리 문자열로 반환"""
+    if not raw_id: return ""
+    return re.sub(r'[^a-fA-F0-9]', '', raw_id)
+
 def clear_database(db_id):
-    query_url = f"https://api.notion.com/v1/databases/{db_id}/query"
+    target_id = clean_id(db_id)
+    query_url = f"https://api.notion.com/v1/databases/{target_id}/query"
     res = requests.post(query_url, headers=HEADERS)
     if res.status_code == 200:
         for page in res.json().get("results", []):
@@ -38,36 +44,18 @@ def get_article_info(url):
                 break
         if not content:
             content = " ".join([p.get_text(strip=True) for p in soup.find_all('p')])
-
         if len(content) < 80: return None
-
         img_tag = soup.find('meta', property='og:image')
         img = img_tag['content'] if img_tag else "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000"
         summary = content[:100].replace("\n", " ").strip() + "..."
         return {"img": img, "summary": summary}
     except: return None
 
-def is_recent(pub_date_str):
-    try:
-        pub_date = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S +0900')
-        return pub_date >= datetime.now() - timedelta(days=5)
-    except: return False
-
-def get_exclusive_keywords(title):
-    clean_title = re.sub(r'[^\w\s]', ' ', title)
-    return [w for w in clean_title.split() if len(w) >= 3]
-
-def is_duplicate_topic(new_title, global_seen_keywords):
-    new_words = get_exclusive_keywords(new_title)
-    for word in new_words:
-        if word in global_seen_keywords: return True
-    return False
-
 def post_notion(db_id, title, link, img, summary, tag):
-    """노션에 데이터 업로드 (에러 체크 로그 강화)"""
+    target_db_id = clean_id(db_id)
     clean_date = datetime.now().strftime('%Y-%m-%d')
     data = {
-        "parent": {"database_id": db_id},
+        "parent": {"database_id": target_db_id},
         "cover": {"type": "external", "external": {"url": img}},
         "properties": {
             "제목": {"title": [{"text": {"content": title, "link": {"url": link}}}]},
@@ -79,11 +67,12 @@ def post_notion(db_id, title, link, img, summary, tag):
     }
     res = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
     if res.status_code != 200:
-        print(f"      ❌ 노션 전송 실패 ({res.status_code}): {res.text}")
+        print(f"      ❌ 전송 실패 ({res.status_code}): {res.text}")
     else:
-        print(f"      ✅ 노션 전송 완료")
+        print(f"      ✅ 전송 완료")
 
 def collect_news(queries, limit, db_id, tag_name, global_seen_links, global_seen_keywords):
+    if not db_id: return
     count = 0
     search_query = " | ".join([f"\"{q}\"" for q in queries])
     url = f"https://openapi.naver.com/v1/search/news.json?query={search_query}&display=50&sort=sim"
@@ -94,22 +83,25 @@ def collect_news(queries, limit, db_id, tag_name, global_seen_links, global_seen
         print(f"\n▶ [{tag_name}] 분석 시작")
         for item in items:
             if count >= limit: break
-            if not is_recent(item.get('pubDate') or item.get('pub_date')): continue
+            pub_date_str = item.get('pubDate') or item.get('pub_date')
+            try:
+                pub_date = datetime.strptime(pub_date_str, '%a, %d %b %Y %H:%M:%S +0900')
+                if pub_date < datetime.now() - timedelta(days=5): continue
+            except: continue
+            
             title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
             link = item['originallink'] or item['link']
-            if link in global_seen_links or is_duplicate_topic(title, global_seen_keywords): continue
+            if link in global_seen_links: continue
             
             article_data = get_article_info(link)
             if not article_data: continue
 
             print(f"   ({count+1}/{limit}) 시도: {title[:20]}...")
             post_notion(db_id, title, link, article_data['img'], article_data['summary'], tag_name)
-            
             global_seen_links.add(link)
-            global_seen_keywords.update(get_exclusive_keywords(title))
             count += 1
     else:
-        print(f"   X 네이버 API 오류: {res.status_code}")
+        print(f"   X API 오류: {res.status_code}")
 
 if __name__ == "__main__":
     for d_id in DB_IDS.values():
