@@ -2,6 +2,7 @@ import os, requests, re
 from datetime import datetime
 from bs4 import BeautifulSoup
 
+# 환경 변수 설정
 NAVER_ID = os.environ.get('NAVER_CLIENT_ID')
 NAVER_SECRET = os.environ.get('NAVER_CLIENT_SECRET')
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
@@ -28,18 +29,29 @@ def get_img(url):
         return img['content'] if img else "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000"
     except: return "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000"
 
-def get_topic_fingerprint(title):
-    title = re.sub(r'[^\w\s]', ' ', title)
-    return set([w for w in title.split() if len(w) >= 2])
+def get_topic_signature(title):
+    """중복 판단을 위한 제목 키워드 추출 (띄어쓰기 무관)"""
+    clean_title = re.sub(r'[^\w\s]', ' ', title)
+    return set([w for w in clean_title.split() if len(w) >= 2])
 
 def is_duplicate_topic(new_title, global_seen_topics):
-    new_fp = get_topic_fingerprint(new_title)
-    if not new_fp: return True
-    for old_fp in global_seen_topics:
-        intersection = new_fp.intersection(old_fp)
-        if not new_fp or not old_fp: continue
-        similarity = len(intersection) / min(len(new_fp), len(old_fp))
+    """주제 중복 정밀 검사"""
+    new_sig = get_topic_signature(new_title)
+    if not new_sig: return True
+    
+    for old_sig in global_seen_topics:
+        intersection = new_sig.intersection(old_sig)
+        
+        # [규칙 1] 4글자 이상 핵심 단어(영업이익, 흑자전환, 해킹여파 등) 겹치면 차단
+        if any(len(w) >= 4 for w in intersection): return True
+        
+        # [규칙 2] 인물명/회사명 포함 2글자 이상 단어가 3개 이상 겹치면 차단
+        if len(intersection) >= 3: return True
+        
+        # [규칙 3] 제목이 짧을 경우 유사도가 50% 넘으면 차단
+        similarity = len(intersection) / min(len(new_sig), len(old_sig))
         if similarity >= 0.5: return True
+            
     return False
 
 def post_notion(db_id, title, link, img, tag):
@@ -64,20 +76,21 @@ def collect_news(queries, limit, db_id, tag_name, global_seen_links, global_seen
     
     if res.status_code == 200:
         for item in res.json().get('items', []):
-            if count >= limit: break # 10개 도달 시 즉시 중단
+            if count >= limit: break # 한 태그당 10개 엄격 제한
             
             title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
             link = item['originallink'] or item['link']
             
+            # 필터링
             if not any(q.replace(" ", "").lower() in title.replace(" ", "").lower() for q in queries): continue
             if link in global_seen_links: continue
             if is_duplicate_topic(title, global_seen_topics): continue
                 
             global_seen_links.add(link)
-            global_seen_topics.append(get_topic_fingerprint(title))
+            global_seen_topics.append(get_topic_signature(title))
             post_notion(db_id, title, link, get_img(link), tag_name)
             count += 1
-    print(f"[{tag_name}] 최종 수집 개수: {count}")
+    print(f"[{tag_name}] 수집 완료: {count}개")
 
 if __name__ == "__main__":
     for d_id in DB_IDS.values():
