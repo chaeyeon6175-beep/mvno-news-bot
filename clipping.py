@@ -33,42 +33,23 @@ def is_similar(title1, title2):
     match = SequenceMatcher(None, t1, t2).find_longest_match(0, len(t1), 0, len(t2))
     return ratio > 0.7 or match.size >= 8
 
-def validate_and_get_info(url):
-    """링크가 정상인지 확인하고 정보를 가져옴. 문제 있으면 None 반환"""
+def validate_link(url):
+    """링크가 정상인지 확인. 문제 있으면 None 반환 (소제목 추출 기능 제거)"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        # 1. 페이지 접속 확인 (타임아웃 5초)
         res = requests.get(url, headers=headers, timeout=5, allow_redirects=True)
-        
-        # 상태 코드가 200(정상)이 아니거나, '잘못된 경로' 등의 텍스트가 포함된 경우 제외
         if res.status_code != 200 or "잘못된 경로" in res.text or "존재하지 않는" in res.text:
             return None
-
+        
         soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 2. 소제목 추출 (보강된 로직)
-        sub_title = ""
-        for selector in ['div.sub_title', 'strong.sub_title', 'h3.sub_title', 'div.article_summary', 'p.summary', 'div#dic_area b']:
-            target = soup.select_one(selector)
-            if target and target.get_text(strip=True):
-                sub_title = target.get_text(strip=True)
-                break
-        
-        if not sub_title:
-            # 소제목 없을 시 본문 요약
-            target = soup.select_one('div#dic_area, div#articleBodyContents, div#articleBody, article')
-            if target:
-                sub_title = ". ".join(re.split(r'\. ', target.get_text(" ", strip=True))[:2])[:150] + "..."
-
-        # 3. 이미지 확인
         img_tag = soup.find('meta', property='og:image')
         img = img_tag['content'] if img_tag else "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000"
-        
-        return {"img": img, "summary": sub_title or "요약 정보 없음"}
+        return img
     except:
         return None
 
-def post_notion(db_id, title, link, img, summary, tag):
+def post_notion(db_id, title, link, img, tag):
+    """노션 전송 (소제목 항목 제거 버전)"""
     target_id = clean_id(db_id)
     if not target_id: return False
     data = {
@@ -76,7 +57,6 @@ def post_notion(db_id, title, link, img, summary, tag):
         "cover": {"type": "external", "external": {"url": img}},
         "properties": {
             "제목": {"title": [{"text": {"content": title, "link": {"url": link}}}]},
-            "소제목": {"rich_text": [{"text": {"content": summary}}]},
             "날짜": {"rich_text": [{"text": {"content": datetime.now().strftime('%Y-%m-%d')}}]},
             "링크": {"url": link},
             "분류": {"multi_select": [{"name": tag}]}
@@ -85,62 +65,92 @@ def post_notion(db_id, title, link, img, summary, tag):
     res = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
     return res.status_code == 200
 
-def collect_news(queries, limit, db_id, tag_name, processed_links, processed_titles):
+def collect_news(db_key, configs, processed_links, processed_titles):
+    db_id = DB_IDS.get(db_key)
     if not db_id: return
-    search_query = " | ".join([f"\"{q}\"" for q in queries])
-    url = f"https://openapi.naver.com/v1/search/news.json?query={search_query}&display=50&sort=sim"
+
+    # 해당 DB 그룹의 모든 키워드를 합쳐서 네이버 검색 (한 번에 많이 가져옴)
+    all_keywords = []
+    for keywords, _, tag in configs:
+        all_keywords.extend(keywords)
+    
+    search_query = " | ".join([f"\"{k}\"" for k in all_keywords])
+    url = f"https://openapi.naver.com/v1/search/news.json?query={search_query}&display=100&sort=sim"
     res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
     
     if res.status_code == 200:
-        print(f"\n▶ [{tag_name}] 검증 및 수집")
         items = res.json().get('items', [])
-        count = 0
+        
+        # 각 태그(기업)별로 수집된 개수를 추적하기 위한 사전
+        tag_counts = {cfg[2]: 0 for cfg in configs}
+        
         for item in items:
-            if count >= limit: break
-            
             title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
-            
-            # 중복 검사 (제목 유사도 기반)
-            if any(is_similar(title, prev_title) for prev_title in processed_titles):
-                continue
-            
-            # 링크 결정: 네이버 뉴스 링크가 가장 안전하므로 우선 확인
             link = item['link'] if 'naver.com' in item['link'] else (item['originallink'] or item['link'])
             
-            # [핵심] 링크 유효성 검증 및 정보 추출
-            info = validate_and_get_info(link)
-            if not info: # 링크가 없거나 잘못된 경로면 아예 무시
+            # 1. 제목 중복 검사
+            if any(is_similar(title, prev_title) for prev_title in processed_titles):
+                continue
+
+            # 2. 정밀 분류 로직: 제목에 특정 기업 키워드가 포함되어 있는지 확인
+            matched_tag = None
+            for keywords, limit, tag in configs:
+                # 해당 태그의 수집 제한량을 넘지 않았는지 확인
+                if tag_counts[tag] >= limit:
+                    continue
+                
+                # 제목에 키워드 중 하나라도 포함되어 있는지 검사 (대소문자 무시)
+                if any(k.lower() in title.lower() for k in keywords):
+                    matched_tag = tag
+                    break
+            
+            # 매칭된 태그가 없으면(제목에 기업명이 없으면) 버림
+            if not matched_tag:
+                continue
+
+            # 3. 링크 유효성 검증
+            img = validate_link(link)
+            if not img:
                 continue
             
-            if post_notion(db_id, title, link, info['img'], info['summary'], tag_name):
+            # 4. 노션 전송
+            if post_notion(db_id, title, link, img, matched_tag):
                 processed_links.add(link)
                 processed_titles.add(title)
-                print(f"      ✅ 성공: {title[:15]}...")
-                count += 1
-                time.sleep(0.2) # 노션 API 속도 제한 준수
+                tag_counts[matched_tag] += 1
+                print(f"      ✅ [{matched_tag}] 성공: {title[:20]}...")
+                time.sleep(0.1)
 
 if __name__ == "__main__":
     links, titles = set(), set()
-    configs = [
-        # MNO
-        (["통신 3사", "이통3사"], 3, DB_IDS["MNO"], "통신 3사"),
-        (["SK텔레콤", "SKT"], 3, DB_IDS["MNO"], "SKT"),
-        (["KT"], 3, DB_IDS["MNO"], "KT"),
-        (["LG유플러스"], 3, DB_IDS["MNO"], "LG U+"),
-        # SUBSID
-        (["SK텔링크", "세븐모바일"], 2, DB_IDS["SUBSID"], "SK텔링크"),
-        (["KT M모바일"], 2, DB_IDS["SUBSID"], "KT M모바일"),
-        (["LG헬로비전", "헬로모바일"], 2, DB_IDS["SUBSID"], "LG헬로비전"),
-        (["미디어로그", "유모바일"], 2, DB_IDS["SUBSID"], "미디어로그"),
-        # FIN
-        (["KB리브모바일"], 2, DB_IDS["FIN"], "KB 리브모바일"),
-        (["토스모바일"], 2, DB_IDS["FIN"], "토스모바일"),
-        (["우리원모바일"], 2, DB_IDS["FIN"], "우리원모바일"),
-        # SMALL
-        (["아이즈모바일"], 1, DB_IDS["SMALL"], "아이즈모바일"),
-        (["프리텔레콤"], 1, DB_IDS["SMALL"], "프리텔레콤"),
-        (["에넥스텔레콤"], 1, DB_IDS["SMALL"], "에넥스텔레콤"),
-        (["인스모바일"], 1, DB_IDS["SMALL"], "인스모바일")
+    
+    # [설정] (키워드 리스트, 목표 수집 개수, 태그명)
+    mno_configs = [
+        (["SK텔레콤", "SKT"], 3, "SKT"),
+        (["KT", "케이티"], 3, "KT"),
+        (["LG유플러스", "LGU+"], 3, "LG U+"),
+        (["통신 3사", "이통3사"], 2, "통신 3사")
     ]
-    for qs, lim, d_id, tag in configs:
-        collect_news(qs, lim, d_id, tag, links, titles)
+    subsid_configs = [
+        (["SK텔링크", "세븐모바일", "7모바일"], 3, "SK텔링크"),
+        (["KT M모바일", "KT엠모바일", "케이티엠모바일"], 3, "KT M모바일"),
+        (["LG헬로비전", "헬로모바일"], 3, "LG헬로비전"),
+        (["미디어로그", "유모바일", "U모바일"], 3, "미디어로그")
+    ]
+    fin_configs = [
+        (["KB리브모바일", "리브엠", "국민은행 알뜰폰"], 3, "KB 리브모바일"),
+        (["토스모바일", "toss mobile"], 3, "토스모바일"),
+        (["우리원모바일"], 3, "우리원모바일")
+    ]
+    small_configs = [
+        (["아이즈모바일", "eyesmobile"], 2, "아이즈모바일"),
+        (["프리텔레콤", "프리모바일"], 2, "프리텔레콤"),
+        (["에넥스텔레콤", "A모바일"], 2, "에넥스텔레콤"),
+        (["인스모바일"], 2, "인스모바일")
+    ]
+
+    print("🚀 뉴스 수집 및 정밀 분류 시작...")
+    collect_news("MNO", mno_configs, links, titles)
+    collect_news("SUBSID", subsid_configs, links, titles)
+    collect_news("FIN", fin_configs, links, titles)
+    collect_news("SMALL", small_configs, links, titles)
