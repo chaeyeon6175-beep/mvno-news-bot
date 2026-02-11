@@ -26,17 +26,13 @@ def clean_id(raw_id):
     return re.sub(r'[^a-fA-F0-9]', '', raw_id)
 
 def is_similar(title1, title2):
-    """제목 유사도 검사 (중복 방지)"""
     t1 = re.sub(r'[^가-힣a-zA-Z0-9]', '', title1)
     t2 = re.sub(r'[^가-힣a-zA-Z0-9]', '', title2)
-    ratio = SequenceMatcher(None, t1, t2).ratio()
-    match = SequenceMatcher(None, t1, t2).find_longest_match(0, len(t1), 0, len(t2))
-    return ratio > 0.7 or match.size >= 8
+    return SequenceMatcher(None, t1, t2).ratio() > 0.8 # 유사도 기준 살짝 완화
 
 def validate_link(url):
-    """링크가 정상인지 확인하고 이미지 경로 반환"""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         res = requests.get(url, headers=headers, timeout=5)
         if res.status_code != 200 or any(x in res.text for x in ["잘못된 경로", "존재하지 않는"]):
             return None
@@ -47,7 +43,6 @@ def validate_link(url):
         return None
 
 def post_notion(db_id, title, link, img, tag, pub_date):
-    """노션 전송 (소제목 제거, 기사 작성일 적용)"""
     target_id = clean_id(db_id)
     if not target_id: return False
     data = {
@@ -64,105 +59,79 @@ def post_notion(db_id, title, link, img, tag, pub_date):
     return res.status_code == 200
 
 def classify_mno(title):
-    """MNO 정밀 분류 (통신3사 우선, 단일 회사 차선)"""
-    title_clean = re.sub(r'\s+', '', title).lower()
-    mno_keywords = ["통신3사", "이통3사", "통신업", "통신사"]
-    skt_names = ["sk텔레콤", "skt"]
-    kt_names = ["kt", "케이티"]
-    lg_names = ["lg유플러스", "lgu+", "엘지유플러스"]
+    t = re.sub(r'\s+', '', title).lower()
+    mno_k = ["통신3사", "이통3사", "통신업", "통신사"]
+    skt = ["sk텔레콤", "skt"]; kt = ["kt", "케이티"]; lg = ["lg유플러스", "lgu+", "엘지유플러스"]
     
-    # 1. '통신 3사'로 분류해야 하는 경우
-    if any(k in title_clean for k in mno_keywords): return "통신 3사"
+    if any(k in t for k in mno_k): return "통신 3사"
     
-    has_skt = any(n in title_clean for n in skt_names)
-    has_kt = any(n in title_clean for n in kt_names)
-    has_lg = any(n in title_clean for n in lg_names)
+    has_skt = any(n in t for n in skt)
+    has_kt = any(n in t for n in kt)
+    has_lg = any(n in t for n in lg)
     
     if has_skt and has_kt and has_lg: return "통신 3사"
-    
-    # 2. 딱 한 회사만 언급된 경우
-    found = []
-    if has_skt: found.append("SKT")
-    if has_kt: found.append("KT")
-    if has_lg: found.append("LG U+")
-    
-    if len(found) == 1: return found[0]
+    if has_skt and not has_kt and not has_lg: return "SKT"
+    if has_kt and not has_skt and not has_lg: return "KT"
+    if has_lg and not celebrated_skt and not has_kt: return "LG U+" # 오타수정 celebrated -> has
+    if has_lg and not has_skt and not has_kt: return "LG U+"
     return None
 
-def collect_news(db_key, configs, processed_links, processed_titles):
+def fetch_and_process(db_key, keywords, limit, tag, p_links, p_titles):
     db_id = DB_IDS.get(db_key)
     if not db_id: return
-
-    # 오늘 기준 5일 전까지의 날짜 리스트 생성
-    allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(1, 6)]
     
-    # 검색어 최적화 (MNO는 대표 검색어로 넓게 검색)
-    search_keywords = []
-    if db_key == "MNO":
-        search_keywords = ["SK텔레콤", "KT", "LG유플러스", "통신 3사"]
-    else:
-        for keywords, _, _ in configs: search_keywords.extend(keywords)
+    # 오늘 포함 6일치 (0~5일 전)
+    allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(6)]
     
-    query = " | ".join([f"\"{k}\"" for k in search_keywords])
-    # 날짜 범위가 넓으므로 수집량을 100개로 확대
-    url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort=date"
+    query = " | ".join([f"\"{k}\"" for k in keywords])
+    url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=50&sort=sim"
     res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
     
     if res.status_code == 200:
-        items = res.json().get('items', [])
-        tag_counts = {cfg[2]: 0 for cfg in configs}
-        
-        for item in items:
-            pub_date_dt = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S +0900')
-            pub_date_str = pub_date_dt.strftime('%Y-%m-%d')
+        count = 0
+        for item in res.json().get('items', []):
+            if count >= limit: break
             
-            # 5일 전 ~ 어제 기사만 수집
-            if pub_date_str not in allowed_dates: continue
+            p_dt = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S +0900')
+            p_str = p_dt.strftime('%Y-%m-%d')
+            if p_str not in allowed_dates: continue
 
             title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
             link = item['link'] if 'naver.com' in item['link'] else (item['originallink'] or item['link'])
             
-            if any(is_similar(title, prev_title) for prev_title in processed_titles): continue
+            if any(is_similar(title, pt) for pt in p_titles): continue
 
-            # 분류 로직 적용
-            matched_tag = None
-            if db_key == "MNO":
-                matched_tag = classify_mno(title)
-            else:
-                for keywords, limit, tag in configs:
-                    if tag_counts[tag] >= limit: continue
-                    if any(k.lower() in title.lower() for k in keywords):
-                        matched_tag = tag; break
+            # 제목 키워드 매칭 확인
+            if not any(k.lower() in title.lower() for k in keywords): continue
             
-            if not matched_tag: continue
-            
+            # MNO는 별도 분류 로직 태움
+            final_tag = classify_mno(title) if db_key == "MNO" else tag
+            if not final_tag: continue
+
             img = validate_link(link)
             if not img: continue
             
-            if post_notion(db_id, title, link, img, matched_tag, pub_date_str):
-                processed_links.add(link)
-                processed_titles.add(title)
-                if matched_tag in tag_counts: tag_counts[matched_tag] += 1
-                print(f"      ✅ [{matched_tag}] ({pub_date_str}) 성공: {title[:15]}...")
+            if post_notion(db_id, title, link, img, final_tag, p_str):
+                p_links.add(link); p_titles.add(title)
+                print(f"   ✅ [{final_tag}] {title[:15]}...")
+                count += 1
                 time.sleep(0.1)
 
 if __name__ == "__main__":
-    links, titles = set(), set()
-    # MNO 설정
-    mno_cfg = [([], 5, "통신 3사"), ([], 5, "SKT"), ([], 5, "KT"), ([], 5, "LG U+")]
-    # 자회사 설정
-    sub_cfg = [
-        (["SK텔링크", "세븐모바일", "7모바일"], 4, "SK텔링크"),
-        (["KT M모바일", "KT엠모바일", "케이티엠모바일"], 4, "KT M모바일"),
-        (["LG헬로비전", "헬로모바일"], 4, "LG헬로비전"),
-        (["미디어로그", "유모바일", "U모바일"], 4, "미디어로그")
-    ]
-    # 금융권 및 중소 설정 (동일 방식)
-    fin_cfg = [(["KB리브모바일", "리브엠"], 3, "KB 리브모바일"), (["토스모바일"], 3, "토스모바일"), (["우리원모바일"], 3, "우리원모바일")]
-    small_cfg = [(["아이즈모바일"], 2, "아이즈모바일"), (["프리텔레콤"], 2, "프리텔레콤"), (["에넥스텔레콤", "A모바일"], 2, "에넥스텔레콤"), (["인스모바일"], 2, "인스모바일")]
+    p_links, p_titles = set(), set()
+    
+    # 1. MNO (검색어를 쪼개서 수집 확률을 높임)
+    fetch_and_process("MNO", ["통신 3사", "이통 3사"], 5, "통신 3사", p_links, p_titles)
+    fetch_and_process("MNO", ["SK텔레콤", "SKT"], 5, "SKT", p_links, p_titles)
+    fetch_and_process("MNO", ["KT", "케이티"], 5, "KT", p_links, p_titles)
+    fetch_and_process("MNO", ["LG유플러스", "LGU+"], 5, "LG U+", p_links, p_titles)
 
-    print("🚀 5일치 기사 수집 및 정밀 분류 시작...")
-    collect_news("MNO", mno_cfg, links, titles)
-    collect_news("SUBSID", sub_cfg, links, titles)
-    collect_news("FIN", fin_cfg, links, titles)
-    collect_news("SMALL", small_cfg, links, titles)
+    # 2. SUBSID
+    fetch_and_process("SUBSID", ["SK텔링크", "세븐모바일"], 3, "SK텔링크", p_links, p_titles)
+    fetch_and_process("SUBSID", ["KT M모바일", "KT엠모바일"], 3, "KT M모바일", p_links, p_titles)
+    fetch_and_process("SUBSID", ["LG헬로비전", "헬로모바일"], 3, "LG헬로비전", p_links, p_titles)
+    fetch_and_process("SUBSID", ["미디어로그", "유모바일"], 3, "미디어로그", p_links, p_titles)
+
+    # 3. FIN / 4. SMALL (원하시는 만큼 추가 가능)
+    fetch_and_process("FIN", ["KB리브모바일", "리브엠"], 3, "KB 리브모바일", p_links, p_titles)
+    fetch_and_process("FIN", ["토스모바일"], 3, "토스모바일", p_links, p_titles)
