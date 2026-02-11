@@ -2,7 +2,7 @@ import os, requests, re
 from datetime import datetime
 from bs4 import BeautifulSoup
 
-# 환경 변수 설정
+# [환경 변수 로드 부분은 동일]
 NAVER_ID = os.environ.get('NAVER_CLIENT_ID')
 NAVER_SECRET = os.environ.get('NAVER_CLIENT_SECRET')
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
@@ -29,29 +29,23 @@ def get_img(url):
         return img['content'] if img else "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000"
     except: return "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000"
 
-def get_topic_signature(title):
-    """중복 판단을 위한 제목 키워드 추출 (띄어쓰기 무관)"""
+def get_exclusive_keywords(title):
+    """제목에서 중복을 방지할 '독점 키워드' 추출"""
     clean_title = re.sub(r'[^\w\s]', ' ', title)
-    return set([w for w in clean_title.split() if len(w) >= 2])
-
-def is_duplicate_topic(new_title, global_seen_topics):
-    """주제 중복 정밀 검사"""
-    new_sig = get_topic_signature(new_title)
-    if not new_sig: return True
+    words = clean_title.split()
     
-    for old_sig in global_seen_topics:
-        intersection = new_sig.intersection(old_sig)
-        
-        # [규칙 1] 4글자 이상 핵심 단어(영업이익, 흑자전환, 해킹여파 등) 겹치면 차단
-        if any(len(w) >= 4 for w in intersection): return True
-        
-        # [규칙 2] 인물명/회사명 포함 2글자 이상 단어가 3개 이상 겹치면 차단
-        if len(intersection) >= 3: return True
-        
-        # [규칙 3] 제목이 짧을 경우 유사도가 50% 넘으면 차단
-        similarity = len(intersection) / min(len(new_sig), len(old_sig))
-        if similarity >= 0.5: return True
-            
+    # 3글자 이상의 단어들(인물명, 기업명, 핵심 명사)을 추출
+    # 예: '홍범식', '영업이익', '흑자전환', '해킹여파' 등
+    return [w for w in words if len(w) >= 3]
+
+def is_duplicate_topic(new_title, seen_keywords):
+    """제목에 이미 수집된 '독점 키워드'가 하나라도 포함되어 있는지 확인"""
+    new_words = get_exclusive_keywords(new_title)
+    
+    for word in new_words:
+        # 이전에 수집된 기사의 핵심 단어 중 현재 제목에 포함된 것이 있다면 중복!
+        if word in seen_keywords:
+            return True
     return False
 
 def post_notion(db_id, title, link, img, tag):
@@ -68,7 +62,7 @@ def post_notion(db_id, title, link, img, tag):
     }
     requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
 
-def collect_news(queries, limit, db_id, tag_name, global_seen_links, global_seen_topics):
+def collect_news(queries, limit, db_id, tag_name, global_seen_links, global_seen_keywords):
     count = 0
     search_query = " | ".join([f"\"{q}\"" for q in queries])
     res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={search_query}&display=100&sort=date", 
@@ -76,41 +70,57 @@ def collect_news(queries, limit, db_id, tag_name, global_seen_links, global_seen
     
     if res.status_code == 200:
         for item in res.json().get('items', []):
-            if count >= limit: break # 한 태그당 10개 엄격 제한
+            if count >= limit: break 
             
             title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
             link = item['originallink'] or item['link']
             
-            # 필터링
+            # [기본 필터]
             if not any(q.replace(" ", "").lower() in title.replace(" ", "").lower() for q in queries): continue
             if link in global_seen_links: continue
-            if is_duplicate_topic(title, global_seen_topics): continue
+            
+            # [핵심 필터] 주제 독점 방지 (인물명, 핵심 단어 중복 체크)
+            if is_duplicate_topic(title, global_seen_keywords):
+                continue
                 
+            # 수집 확정 시, 해당 기사의 모든 3글자 이상 단어를 '금지어' 리스트에 추가
             global_seen_links.add(link)
-            global_seen_topics.append(get_topic_signature(title))
+            global_seen_keywords.update(get_exclusive_keywords(title)) 
+            
             post_notion(db_id, title, link, get_img(link), tag_name)
             count += 1
-    print(f"[{tag_name}] 수집 완료: {count}개")
+    print(f"[{tag_name}] 최종 수집: {count}개")
 
 if __name__ == "__main__":
     for d_id in DB_IDS.values():
         if d_id: clear_database(d_id)
     
     global_seen_links = set()
-    global_seen_topics = []
+    global_seen_keywords = set() # 수집된 기사들의 모든 핵심 단어 저장소
 
-    # 1. MNO (각 10개)
-    for qs, lim, tag in [ (["통신 3사", "통신3사", "이통3사"], 10, "통신 3사"), (["SK텔레콤", "SKT"], 10, "SKT"), (["KT", "케이티"], 10, "KT"), (["LG유플러스", "LGU+"], 10, "LGU+") ]:
-        collect_news(qs, lim, DB_IDS["MNO"], tag, global_seen_links, global_seen_topics)
-    
-    # 2. SUBSID (각 10개)
-    for qs, lim, tag in [ (["SK텔링크", "세븐모바일"], 10, "SK텔링크"), (["KT M모바일", "KT엠모바일"], 10, "KT M모바일"), (["KT스카이라이프"], 10, "KT스카이라이프"), (["LG헬로비전", "헬로모바일"], 10, "LG헬로비전"), (["미디어로그", "유모바일"], 10, "미디어로그") ]:
-        collect_news(qs, lim, DB_IDS["SUBSID"], tag, global_seen_links, global_seen_topics)
+    # 각 섹션별 실행 (순서대로 10개씩 엄격 제한)
+    configs = [
+        # MNO
+        (["통신 3사", "통신3사", "이통3사"], 10, DB_IDS["MNO"], "통신 3사"),
+        (["SK텔레콤", "SKT"], 10, DB_IDS["MNO"], "SKT"),
+        (["KT", "케이티"], 10, DB_IDS["MNO"], "KT"),
+        (["LG유플러스", "LGU+"], 10, DB_IDS["MNO"], "LGU+"),
+        # SUBSID
+        (["SK텔링크", "세븐모바일"], 10, DB_IDS["SUBSID"], "SK텔링크"),
+        (["KT M모바일", "KT엠모바일"], 10, DB_IDS["SUBSID"], "KT M모바일"),
+        (["KT스카이라이프"], 10, DB_IDS["SUBSID"], "KT스카이라이프"),
+        (["LG헬로비전", "헬로모바일"], 10, DB_IDS["SUBSID"], "LG헬로비전"),
+        (["미디어로그", "유모바일"], 10, DB_IDS["SUBSID"], "미디어로그"),
+        # FIN
+        (["KB리브모바일", "리브엠"], 10, DB_IDS["FIN"], "KB 리브모바일"),
+        (["토스모바일"], 10, DB_IDS["FIN"], "토스모바일"),
+        (["우리원모바일"], 10, DB_IDS["FIN"], "우리원모바일"),
+        # SMALL
+        (["아이즈모바일"], 10, DB_IDS["SMALL"], "아이즈모바일"),
+        (["프리텔레콤", "프리모바일"], 10, DB_IDS["SMALL"], "프리텔레콤"),
+        (["에넥스텔레콤", "A모바일"], 10, DB_IDS["SMALL"], "에넥스텔레콤"),
+        (["인스모바일"], 10, DB_IDS["SMALL"], "인스모바일")
+    ]
 
-    # 3. FIN (각 10개)
-    for qs, lim, tag in [ (["KB리브모바일", "리브엠"], 10, "KB 리브모바일"), (["토스모바일"], 10, "토스모바일"), (["우리원모바일"], 10, "우리원모바일") ]:
-        collect_news(qs, lim, DB_IDS["FIN"], tag, global_seen_links, global_seen_topics)
-
-    # 4. SMALL (각 10개)
-    for qs, lim, tag in [ (["아이즈모바일"], 10, "아이즈모바일"), (["프리텔레콤", "프리모바일"], 10, "프리텔레콤"), (["에넥스텔레콤", "A모바일"], 10, "에넥스텔레콤"), (["인스모바일"], 10, "인스모바일") ]:
-        collect_news(qs, lim, DB_IDS["SMALL"], tag, global_seen_links, global_seen_topics)
+    for qs, lim, d_id, tag in configs:
+        collect_news(qs, lim, d_id, tag, global_seen_links, global_seen_keywords)
