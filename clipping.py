@@ -1,88 +1,40 @@
-import os, requests, re
-from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
+import os, requests, json
 
 # 환경 변수 로드
-NAVER_ID = os.environ.get('NAVER_CLIENT_ID')
-NAVER_SECRET = os.environ.get('NAVER_CLIENT_SECRET')
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
-DB_IDS = {
-    "MNO": os.environ.get('DB_ID_MNO'),
-    "SUBSID": os.environ.get('DB_ID_SUBSID'),
-    "FIN": os.environ.get('DB_ID_FIN'),
-    "SMALL": os.environ.get('DB_ID_SMALL')
-}
+DB_ID = os.environ.get('DB_ID_SUBSID') # 자회사 ID 테스트
+
 HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
     "Content-Type": "application/json",
     "Notion-Version": "2022-06-28"
 }
 
-def clean_id(raw_id):
-    if not raw_id: return ""
-    return re.sub(r'[^a-fA-F0-9]', '', raw_id)
-
-def post_notion(db_id, title, link, img, summary, tag):
-    target_id = clean_id(db_id)
-    if not target_id: return
-    
-    data = {
-        "parent": {"database_id": target_id},
-        "cover": {"type": "external", "external": {"url": img}},
-        "properties": {
-            "제목": {"title": [{"text": {"content": title, "link": {"url": link}}}]},
-            "소제목": {"rich_text": [{"text": {"content": summary}}]},
-            "날짜": {"date": {"start": datetime.now().strftime('%Y-%m-%d')}},
-            "링크": {"url": link},
-            "분류": {"multi_select": [{"name": tag}]}
-        }
-    }
-    res = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
-    if res.status_code != 200:
-        print(f"      ❌ 전송 실패 (ID: {target_id}): {res.text}")
+def diagnose():
+    # 1. 봇 정보 확인 (어느 워크스페이스 소속인지)
+    print("🔍 1. 봇 정보 확인 중...")
+    me_res = requests.get("https://api.notion.com/v1/users/me", headers=HEADERS)
+    if me_res.status_code == 200:
+        me_data = me_res.json()
+        print(f"   ✅ 성공! 봇 이름: {me_data.get('name')}")
+        print(f"   🏢 소속 워크스페이스 ID: {me_data.get('bot', {}).get('workspace_name', '알 수 없음')}")
     else:
-        print(f"      ✅ 전송 성공: {title[:15]}...")
+        print(f"   ❌ 봇 정보 가져오기 실패: {me_res.text}")
+        return
 
-def get_article_info(url):
-    try:
-        res = requests.get(url, headers={'User-Agent':'Mozilla/5.0'}, timeout=5)
-        res.encoding = 'utf-8'
-        soup = BeautifulSoup(res.text, 'html.parser')
-        content = ""
-        for selector in ['div#articleBodyContents', 'div#articleBody', 'article', 'div.content']:
-            target = soup.select_one(selector)
-            if target:
-                content = target.get_text(strip=True)
-                break
-        if not content: content = "본문 요약을 가져올 수 없습니다."
-        img_tag = soup.find('meta', property='og:image')
-        img = img_tag['content'] if img_tag else "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000"
-        return {"img": img, "summary": content[:100] + "..."}
-    except:
-        return {"img": "https://images.unsplash.com/photo-1504711434969-e33886168f5c?q=80&w=1000", "summary": "요약을 불러오지 못했습니다."}
-
-def collect_news(queries, limit, db_id, tag_name):
-    if not db_id: return
-    search_query = " | ".join([f"\"{q}\"" for q in queries])
-    url = f"https://openapi.naver.com/v1/search/news.json?query={search_query}&display=10&sort=sim"
-    res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
+    # 2. 데이터베이스 접근 확인
+    target_id = DB_ID.replace("-", "").strip()
+    print(f"\n🔍 2. 데이터베이스({target_id}) 접근 확인 중...")
+    db_res = requests.get(f"https://api.notion.com/v1/databases/{target_id}", headers=HEADERS)
     
-    if res.status_code == 200:
-        items = res.json().get('items', [])
-        print(f"\n▶ [{tag_name}] 분석 시작")
-        for item in items[:limit]:
-            title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
-            link = item['originallink'] or item['link']
-            info = get_article_info(link)
-            post_notion(db_id, title, link, info['img'], info['summary'], tag_name)
+    if db_res.status_code == 200:
+        print("   ✅ 축하합니다! 데이터베이스 연결에 성공했습니다.")
+        print(f"   📋 DB 제목: {db_res.json().get('title', [{}])[0].get('plain_text', '제목없음')}")
+    elif db_res.status_code == 404:
+        print("   ❌ 404 에러: 이 봇은 해당 DB를 찾을 수 없습니다.")
+        print("      👉 해결책: 페이지 우측 상단 '...' -> '연결 추가'에서 이 봇이 정말 추가되어 있는지 다시 보세요.")
     else:
-        print(f"   X 네이버 API 오류: {res.status_code}")
+        print(f"   ❌ 기타 오류 ({db_res.status_code}): {db_res.text}")
 
 if __name__ == "__main__":
-    configs = [
-        (["SK텔링크", "세븐모바일"], 2, DB_IDS["SUBSID"], "SK텔링크"),
-        (["KT M모바일", "KT엠모바일"], 2, DB_IDS["SUBSID"], "KT M모바일"),
-        (["LG헬로비전", "헬로모바일"], 2, DB_IDS["SUBSID"], "LG헬로비전")
-    ]
-    for qs, lim, d_id, tag in configs:
-        collect_news(qs, lim, d_id, tag)
+    diagnose()
