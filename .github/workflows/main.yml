@@ -2,8 +2,13 @@ name: clipping
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 한국 시간 매일 오전 9시 (UTC 00:00)
-  workflow_dispatch:      # 수동 실행 버튼 (테스트용)
+    # 한국 시간(KST) 매일 오전 9시 30분은 UTC 00:30입니다.
+    - cron: '30 0 * * *'
+  # 스케줄러가 잠들지 않도록 수동 실행 및 다른 이벤트 시에도 작동하게 설정
+  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
@@ -22,12 +27,9 @@ jobs:
 
       - name: Run script
         env:
-          # 환경 변수 전달 (GitHub Secrets에서 값을 가져옴)
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          
-          # 4개의 데이터베이스 ID 전달
           DB_ID_MNO: ${{ secrets.DB_ID_MNO }}
           DB_ID_SUBSID: ${{ secrets.DB_ID_SUBSID }}
           DB_ID_FIN: ${{ secrets.DB_ID_FIN }}
