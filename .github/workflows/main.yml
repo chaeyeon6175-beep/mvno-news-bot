@@ -1,29 +1,22 @@
-name: clipping
+name: News Clipping Automation
 
 on:
   schedule:
-    # 한국 시간(KST) 매일 오전 10시는 UTC 01:00입니다.
-    - cron: '0 1 * * *'
-  workflow_dispatch: # 수동 실행 버튼
-  push: # 코드 수정 시 즉시 실행 테스트용
-    branches:
-      - main
+    - cron: '0 0 * * *'  # 한국 시간 매일 오전 9시 실행
+  workflow_dispatch:      # 수동 실행 버튼 활성화
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
       - name: Install dependencies
         run: |
           pip install requests beautifulsoup4
-
       - name: Run script
         env:
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
