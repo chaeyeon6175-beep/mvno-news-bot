@@ -2,11 +2,10 @@ name: clipping
 
 on:
   schedule:
-    # 한국 시간(KST) 매일 오전 9시 30분은 UTC 00:30입니다.
-    - cron: '30 0 * * *'
-  # 스케줄러가 잠들지 않도록 수동 실행 및 다른 이벤트 시에도 작동하게 설정
-  workflow_dispatch:
-  push:
+    # 한국 시간(KST) 매일 오전 10시는 UTC 01:00입니다.
+    - cron: '0 1 * * *'
+  workflow_dispatch: # 수동 실행 버튼
+  push: # 코드 수정 시 즉시 실행 테스트용
     branches:
       - main
 
