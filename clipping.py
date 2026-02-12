@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from difflib import SequenceMatcher
 
-# 1. 전역 변수 설정 (함수 밖으로 꺼내어 어디서든 접근 가능하게 수정)
+# 1. 전역 변수 설정 (최상단에 배치하여 어디서든 접근 가능하게 함)
 NAVER_ID = os.environ.get('NAVER_CLIENT_ID')
 NAVER_SECRET = os.environ.get('NAVER_CLIENT_SECRET')
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
@@ -20,10 +20,9 @@ HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
-# --- 유틸리티 함수 ---
+# --- 공통 유틸리티 함수 ---
 
 def clear_notion_database(db_id):
-    """DB 초기화"""
     if not db_id: return
     target_id = re.sub(r'[^a-fA-F0-9]', '', db_id)
     try:
@@ -35,7 +34,6 @@ def clear_notion_database(db_id):
     except: pass
 
 def is_duplicate_by_8_chars(new_title, processed_titles):
-    """8글자 중복 체크"""
     t1 = re.sub(r'[^가-힣a-zA-Z0-9]', '', new_title)
     for prev_title in processed_titles:
         t2 = re.sub(r'[^가-힣a-zA-Z0-9]', '', prev_title)
@@ -44,7 +42,6 @@ def is_duplicate_by_8_chars(new_title, processed_titles):
     return False
 
 def validate_link(url):
-    """이미지 추출"""
     try:
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -53,7 +50,6 @@ def validate_link(url):
     except: return "https://images.unsplash.com/photo-1504711434969-e33886168f5c"
 
 def post_notion(db_id, title, link, img, tag, pub_date, content=""):
-    """노션 등록"""
     if not db_id: return False
     target_id = re.sub(r'[^a-fA-F0-9]', '', db_id)
     data = {
@@ -71,11 +67,8 @@ def post_notion(db_id, title, link, img, tag, pub_date, content=""):
     return requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data).status_code == 200
 
 def classify_mno_precision(title):
-    """MNO 분류: SKT 단독 기사 판별 및 제외 키워드 적용"""
     t_clean = re.sub(r'\s+', '', title).lower()
-    # 제외 대상
     if any(ex in t_clean for ex in ["sk쉴더스", "지니뮤직", "kt알파", "ktalpha"]): return None
-    # 자회사 대상
     if any(sub in t_clean for sub in ["sk텔링크", "7모바일", "세븐모바일", "ktm모바일", "헬로모바일", "유모바일"]): return None
 
     skt_k, kt_k, lg_k = ["sk텔레콤", "skt"], ["kt", "케이티"], ["lg유플러스", "lgu+", "엘지유플러스", "u플러스", "유플러스"]
@@ -87,7 +80,7 @@ def classify_mno_precision(title):
     if (sum([h_skt, h_kt, h_lg]) >= 2) or any(k in t_clean for k in ["통신3사", "이통3사", "이통사", "통신사"]): return "통신 3사"
     return None
 
-# --- 핵심 수집 함수 ---
+# --- 뉴스 수집 함수 ---
 
 def collect_news(db_key, configs, processed_titles, days_range):
     db_id = DB_IDS.get(db_key)
@@ -99,7 +92,7 @@ def collect_news(db_key, configs, processed_titles, days_range):
         query += " -\"SK쉴더스\" -\"지니뮤직\""
         
         items = []
-        for sort_opt in ["date", "sim"]: # 1차 최신순, 2차 관련도순
+        for sort_opt in ["date", "sim"]:
             res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort={sort_opt}", 
                                headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
             if res.status_code == 200:
@@ -115,7 +108,6 @@ def collect_news(db_key, configs, processed_titles, days_range):
 
             if is_duplicate_by_8_chars(title, processed_titles): continue
 
-            # 분류 로직
             if db_key == "MNO":
                 mno_check = classify_mno_precision(title)
                 if mno_check != tag: continue
@@ -125,32 +117,32 @@ def collect_news(db_key, configs, processed_titles, days_range):
                 if classify_mno_precision(title) is not None: continue
                 final_tag, content_to_send = tag, (desc if "SK텔링크" in tag else "")
 
-            # 수집 조건 (금융/중소 최소 2개 보장 포함)
+            # 기간 조건 + 금융/중소 최소 2개 보장
             if (db_key in ["FIN", "SMALL"] and count < 2) or (p_date in allowed_dates):
                 if post_notion(db_id, title, item['link'], validate_link(item['link']), final_tag, p_date, content_to_send):
                     processed_titles.add(title)
                     count += 1
-                    print(f"✅ [{final_tag}] {p_date} 수집 완료")
+                    print(f"✅ [{final_tag}] {p_date} 수집 성공")
             if count >= limit: break
 
-# --- 실행 블록 ---
+# --- 실행 메인 로직 ---
 
 if __name__ == "__main__":
-    # 1. DB 초기화
+    # 1. 초기화 (DB_IDS가 상단에 정의되어 있어 이제 에러가 나지 않음)
     for k in DB_IDS: 
         if DB_IDS[k]: clear_notion_database(DB_IDS[k])
     
     titles = set()
     
-    # 2. 자회사 (60일, SK텔링크 우선)
+    # 2. 자회사 (60일 범위, SK텔링크 우선 수집)
     collect_news("SUBSID", [
-        (["SK텔링크", "7모바일", "세븐모바일"], 10, "SK텔링크"),
+        (["SK텔링크", "7모바일", "세븐모바일", "에스케이텔링크"], 10, "SK텔링크"),
         (["KT M모바일", "KT엠모바일"], 5, "KT M모바일"),
         (["LG헬로비전", "헬로모바일"], 5, "LG헬로비전"),
         (["유모바일", "U+유모바일"], 5, "미디어로그")
     ], titles, 60)
     
-    # 3. MNO (3일 범위로 소폭 확대하여 SKT 10개 확보 가능성 증대)
+    # 3. MNO (3일 범위로 소폭 확대하여 SKT 10개 확보 보장)
     collect_news("MNO", [
         (["SK텔레콤", "SKT"], 20, "SKT"),
         (["KT", "케이티"], 10, "KT"),
@@ -158,7 +150,7 @@ if __name__ == "__main__":
         (["통신사", "이통사"], 5, "통신 3사")
     ], titles, 3)
     
-    # 4. 금융/중소 (60일, 최소 2개 보장)
+    # 4. 금융/중소 (60일 범위, 기사 없을 시 최소 2개 출력)
     collect_news("FIN", [
         (["리브모바일", "리브엠"], 5, "KB 리브모바일"),
         (["우리원모바일"], 5, "우리원모바일"),
