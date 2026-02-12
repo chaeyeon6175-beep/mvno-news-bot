@@ -2,8 +2,9 @@ name: News Clipping Automation
 
 on:
   schedule:
-    # 한국 시간 오전 10시 (UTC 01:00)
+    # 한국 시간(KST) 오전 10시 = UTC 01:00
     - cron: '0 1 * * *'
+  # 지금 당장 결과를 확인하거나 수동으로 실행하고 싶을 때 사용
   workflow_dispatch:
 
 jobs:
@@ -11,13 +12,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install dependencies
         run: pip install requests beautifulsoup4
-      - name: Run script
+
+      - name: Run news clipping script
         env:
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
