@@ -25,7 +25,6 @@ def get_similarity(a, b):
     return SequenceMatcher(None, a, b).ratio()
 
 def check_already_collected(db_id):
-    """오늘 이미 수집된 이력이 있는지 확인 (깃허브 중복 실행 방지)"""
     today = datetime.now().strftime('%Y-%m-%d')
     url = f"https://api.notion.com/v1/databases/{db_id}/query"
     filter_data = {"filter": {"property": "날짜", "rich_text": {"equals": today}}, "page_size": 1}
@@ -34,9 +33,9 @@ def check_already_collected(db_id):
 
 def is_telecom_news(title):
     t = title.lower().replace(' ', '')
-    exclude = ["야구", "배구", "농구", "축구", "스포츠", "쇼핑", "이커머스", "11번가", "주가", "증시", "상장", "인사", "동정"]
+    exclude = ["야구", "배구", "농구", "축구", "스포츠", "쇼핑", "주가", "증시", "상장"]
     if any(ex in t for ex in exclude): return False
-    include = ["요금제", "알뜰폰", "mvno", "5g", "6g", "lte", "통신", "가입자", "단말기", "네트워크", "유심", "esim", "로밍", "결합"]
+    include = ["요금제", "알뜰폰", "mvno", "5g", "6g", "lte", "통신", "가입자", "단말기", "네트워크", "유심", "esim", "로밍", "결합", "출시"]
     return any(inc in t for inc in include)
 
 def get_final_tags(title, db_key, default_tag):
@@ -44,11 +43,8 @@ def get_final_tags(title, db_key, default_tag):
     t = title.lower().replace(' ', '')
     
     if db_key == "MNO":
-        # 타 DB 키워드 철저 배제
-        others = ["텔링크", "엠모바일", "헬로비전", "스카이라이프", "미디어로그", "리브m", "토스", "우리원"]
-        if any(x in t for x in others): return None
-        
-        sa3_kws = ["통신3사", "이통3사", "통신업계", "통신주", "이통사공통", "3사"]
+        # 3사 공통 키워드 우선 확인
+        sa3_kws = ["통신3사", "이통3사", "통신업계", "3사"]
         skt, kt, lg = "skt" in t or "sk텔레콤" in t, "kt" in t or "케이티" in t, "lgu+" in t or "lg유플러스" in t
         
         if any(x in t for x in sa3_kws) or (skt + kt + lg >= 2): return [{"name": "통신 3사"}]
@@ -57,10 +53,10 @@ def get_final_tags(title, db_key, default_tag):
         elif lg: return [{"name": "LG U+"}]
         return [{"name": default_tag}]
 
-    # 2,3,4번 DB 맵 (기존 방식 유지)
+    # 2,3,4번 DB 맵 (금융권 3번 로직 원복 포함)
     maps = {
         "SUBSID": {"SK텔링크": ["sk텔링크", "7모바일"], "KT M모바일": ["ktm모바일", "kt엠모바일"], "LG헬로비전": ["lg헬로비전", "헬로모바일"], "KT스카이라이프": ["스카이라이프"], "미디어로그": ["미디어로그", "유모바일"]},
-        "FIN": {"토스모바일": ["토스모바일", "토스"], "우리원모바일": ["우리원모바일", "우리원"], "KB리브모바일": ["리브모바일", "리브m"]},
+        "FIN": {"토스모바일": ["토스모바일", "토스"], "우리원모바일": ["우리원모바일", "우리원"], "KB리브모바일": ["리브모바일", "리브m", "kb국민"]},
         "SMALL": {"아이즈모바일": ["아이즈모바일"], "프리모바일": ["프리텔레콤", "프리티"], "에넥스텔레콤": ["에넥스텔레콤", "a모바일"], "유니컴즈": ["유니컴즈", "모비스트"], "인스코비": ["인스코비"], "세종텔레콤": ["세종텔레콤", "스노우맨"], "큰사람": ["큰사람", "이야기모바일"]}
     }
     if db_key in maps:
@@ -82,8 +78,8 @@ def post_notion(db_id, title, link, tags, pub_date):
     res = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
     return res.status_code == 200
 
+# --- 1번 DB 수집 (개별 통신사 선점형) ---
 def collect_mno(days=7):
-    """[최종] 1번 DB: 개별 통신사 우선순위 배치 + 1주일 제한"""
     db_id = DB_IDS.get("MNO")
     if check_already_collected(db_id):
         print("⚠️ 오늘 이미 1번 DB 수집이 완료되었습니다.")
@@ -94,12 +90,12 @@ def collect_mno(days=7):
     mno_seen_titles = []
     mno_tag_counts = {"SKT": 0, "KT": 0, "LG U+": 0, "통신 3사": 0}
 
-    # 수집 순서를 개별 통신사 -> 통신 3사 순으로 변경하여 밸런스 유지
+    # 개별 사를 먼저 수집해서 기사 풀을 선점함
     configs = [
-        (["SK텔레콤", "SKT -알뜰폰"], "SKT"),
-        (["KT 케이티 -알뜰폰"], "KT"),
-        (["LG유플러스", "LGU+ -알뜰폰"], "LG U+"),
-        (["통신3사", "통신업계"], "통신 3사")
+        (["SK텔레콤", "SKT"], "SKT"),
+        (["KT", "케이티"], "KT"),
+        (["LG유플러스", "LGU+"], "LG U+"),
+        (["통신3사", "이통3사", "통신업계"], "통신 3사")
     ]
 
     for keywords, target_tag in configs:
@@ -110,7 +106,6 @@ def collect_mno(days=7):
             res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
             if res.status_code == 200: raw_items.extend(res.json().get('items', []))
 
-        # URL 기준 중복 제거
         unique_items = []
         _tmp = set()
         for i in raw_items:
@@ -133,8 +128,8 @@ def collect_mno(days=7):
                         mno_tag_counts[target_tag] += 1
         print(f"✅ MNO - {target_tag}: {mno_tag_counts[target_tag]}개 완료")
 
+# --- 2,3,4번 DB 수집 (기존 로직 유지) ---
 def collect_others(db_key, configs, days):
-    """2,3,4번 DB: 기존 로직 그대로 유지"""
     db_id = DB_IDS.get(db_key)
     allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days + 1)]
     for keywords, limit, default_tag in configs:
@@ -155,10 +150,16 @@ def collect_others(db_key, configs, days):
         print(f"✅ {db_key} - {default_tag} 완료")
 
 if __name__ == "__main__":
-    collect_mno(days=7) # 1번 DB만 7일 제한
+    collect_mno(days=7)
     collect_others("SUBSID", [
         (["SK텔링크"], 12, "SK텔링크"), (["KT엠모바일"], 12, "KT M모바일"),
         (["LG헬로비전"], 12, "LG헬로비전"), (["스카이라이프"], 12, "KT스카이라이프"), (["미디어로그"], 12, "미디어로그")
     ], 60)
-    collect_others("FIN", [(["토스모바일"], 12, "토스모바일"), (["리브모바일"], 12, "KB리브모바일"), (["우리원모바일"], 12, "우리원모바일")], 30)
-    collect_others("SMALL", [(["아이즈모바일"], 12, "아이즈모바일"), (["프리텔레콤"], 12, "프리모바일"), (["에넥스텔레콤"], 12, "에넥스텔레콤"), (["유니컴즈"], 12, "유니컴즈"), (["인스코비"], 12, "인스코비"), (["세종텔레콤"], 12, "세종텔레콤"), (["큰사람"], 12, "큰사람")], 60)
+    # 3번 데이터베이스 건드리지 않고 원복 수집
+    collect_others("FIN", [
+        (["토스모바일"], 12, "토스모바일"), (["리브모바일", "리브M"], 12, "KB리브모바일"), (["우리원모바일"], 12, "우리원모바일")
+    ], 30)
+    collect_others("SMALL", [
+        (["아이즈모바일"], 12, "아이즈모바일"), (["프리텔레콤"], 12, "프리모바일"), (["에넥스텔레콤"], 12, "에넥스텔레콤"), 
+        (["유니컴즈"], 12, "유니컴즈"), (["인스코비"], 12, "인스코비"), (["세종텔레콤"], 12, "세종텔레콤"), (["큰사람"], 12, "큰사람")
+    ], 60)
