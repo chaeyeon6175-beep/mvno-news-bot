@@ -28,7 +28,6 @@ def clear_notion_database(db_id):
         if res.status_code == 200:
             for page in res.json().get("results", []):
                 requests.patch(f"https://api.notion.com/v1/pages/{page['id']}", headers=HEADERS, json={"archived": True})
-            print(f"🗑️ DB({target_id[:5]}) 초기화 완료")
     except: pass
 
 def is_duplicate_by_8_chars(new_title, processed_titles):
@@ -64,33 +63,17 @@ def post_notion(db_id, title, link, img, tag, pub_date, content=""):
     return requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data).status_code == 200
 
 def classify_mno_precision(title):
-    """MNO 분류 로직 수정: 단독 기사와 통합 기사를 엄격히 구분"""
     t_clean = re.sub(r'\s+', '', title).lower()
-    if any(ex in t_clean for ex in ["kt알파", "ktalpha", "케이티알파"]): return None
-    
-    # 자회사명이 포함되면 MNO에서 제외 (자회사 DB로 양보)
-    if any(sub in t_clean for sub in ["sk텔링크", "7모바일", "ktm모바일", "헬로모바일", "유모바일"]): return None
+    if any(ex in t_clean for ex in ["sk쉴더스", "지니뮤직", "kt알파", "ktalpha"]): return None
+    if any(sub in t_clean for sub in ["sk텔링크", "7모바일", "세븐모바일", "ktm모바일", "헬로모바일", "유모바일"]): return None
 
-    skt_k = ["sk텔레콤", "skt"]
-    kt_k = ["kt", "케이티"]
-    lg_k = ["lg유플러스", "lgu+", "엘지유플러스", "u플러스", "유플러스"]
-    mno_combined = ["통신3사", "이통3사", "이통사", "통신업계", "통신사"]
+    skt_k, kt_k, lg_k = ["sk텔레콤", "skt"], ["kt", "케이티"], ["lg유플러스", "lgu+", "엘지유플러스", "u플러스", "유플러스"]
+    h_skt, h_kt, h_lg = any(n in t_clean for n in skt_k), any(n in t_clean for n in kt_k), any(n in t_clean for n in lg_k)
     
-    h_skt = any(n in t_clean for n in skt_k)
-    h_kt = any(n in t_clean for n in kt_k)
-    h_lg = any(n in t_clean for n in lg_k)
-    
-    # [수정] 2개 이상의 통신사가 언급되거나, 특정사가 없는데 통합 키워드만 있는 경우 '통신 3사'
-    if (sum([h_skt, h_kt, h_lg]) >= 2): return "통신 3사"
-    
-    # [수정] 단독 언급 우선 순위 (통합 키워드보다 개별사 이름이 제목에 있으면 해당 사로 분류)
-    if h_skt: return "SKT"
-    if h_kt: return "KT"
-    if h_lg: return "LG U+"
-    
-    # 개별사 이름은 없지만 '통신사' 등 통합 키워드만 있는 경우
-    if any(k in t_clean for k in mno_combined): return "통신 3사"
-    
+    if h_skt and not (h_kt or h_lg): return "SKT"
+    if h_kt and not (h_skt or h_lg): return "KT"
+    if h_lg and not (h_skt or h_kt): return "LG U+"
+    if (sum([h_skt, h_kt, h_lg]) >= 2) or any(k in t_clean for k in ["통신3사", "이통3사", "이통사", "통신사"]): return "통신 3사"
     return None
 
 def collect_news(db_key, configs, processed_titles, days_range):
@@ -99,74 +82,48 @@ def collect_news(db_key, configs, processed_titles, days_range):
     allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days_range + 1)]
 
     for keywords, limit, tag in configs:
-        query = " | ".join([f"\"{k}\"" for k in keywords]) if keywords else "통신사"
-        url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort=date"
-        res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
+        query = " | ".join([f"\"{k}\"" for k in keywords]) if keywords else "알뜰폰"
+        query += " -\"SK쉴더스\" -\"지니뮤직\""
         
-        if res.status_code != 200: continue
-        
+        # 1차 최신순, 실패 시 2차 관련도순 검색
+        items = []
+        for sort_opt in ["date", "sim"]:
+            res = requests.get(f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort={sort_opt}", 
+                               headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
+            if res.status_code == 200:
+                items = res.json().get('items', [])
+                if items: break
+
         count = 0
-        for item in res.json().get('items', []):
-            if count >= limit: break
+        for item in items:
             p_date = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S +0900').strftime('%Y-%m-%d')
-            if p_date not in allowed_dates: continue
-            
             title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
             desc = item['description'].replace('<b>','').replace('</b>','').replace('&quot;','"')
-            
             t_compare = title.lower().replace(' ', '')
-            if keywords and not any(k.lower().replace(' ', '') in t_compare for k in keywords):
-                continue
 
             if is_duplicate_by_8_chars(title, processed_titles): continue
 
-            mno_check = classify_mno_precision(title)
-            if db_key != "MNO" and mno_check is not None: continue
-            if db_key == "MNO" and mno_check is None: continue
+            if db_key == "MNO":
+                mno_check = classify_mno_precision(title)
+                if mno_check != tag: continue
+                final_tag, content_to_send = mno_check, ""
+            else:
+                if not any(k.lower().replace(' ', '') in t_compare for k in keywords): continue
+                if classify_mno_precision(title) is not None: continue
+                final_tag = tag
+                content_to_send = desc if "SK텔링크" in tag else ""
 
-            final_tag = mno_check if db_key == "MNO" else tag
-            content_to_send = desc if "SK텔링크" in str(final_tag) else ""
-
-            img = validate_link(item['link'])
-            if post_notion(db_id, title, item['link'], img, final_tag, p_date, content_to_send):
-                processed_titles.add(title)
-                count += 1
-                print(f"✅ [{final_tag}] ({p_date}) 수집 완료")
+            # 금융/중소(FIN, SMALL)는 기사가 없으면 날짜 제한 무시하고 최소 2개 수집
+            if (db_key in ["FIN", "SMALL"] and count < 2) or (p_date in allowed_dates):
+                if post_notion(db_id, title, item['link'], validate_link(item['link']), final_tag, p_date, content_to_send):
+                    processed_titles.add(title)
+                    count += 1
+            if count >= limit: break
 
 if __name__ == "__main__":
     for key in DB_IDS: clear_notion_database(DB_IDS[key])
     titles = set()
-    
-    # 1. MNO DB (수집량 증대를 위해 SKT 쿼리 강화 및 limit 조정)
-    print("🚀 MNO 기사 정밀 수집 시작...")
-    mno_configs = [
-        (["SK텔레콤", "SKT"], 10, "SKT"), # SKT 수집량 5 -> 10으로 상향
-        (["KT", "케이티"], 7, "KT"),
-        (["LG유플러스", "LGU+", "엘지유플러스"], 7, "LG U+"),
-        (["통신 3사", "이통사", "통신사"], 5, "통신 3사")
-    ]
-    collect_news("MNO", mno_configs, titles, 1)
-    
-    # 2. 자회사 DB (60일)
-    collect_news("SUBSID", [
-        (["SK텔링크", "7모바일", "세븐모바일"], 5, "SK텔링크"),
-        (["KT M모바일", "KT엠모바일"], 3, "KT M모바일"),
-        (["LG헬로비전", "헬로모바일"], 3, "LG헬로비전"),
-        (["u+ 유모바일", "유플러스유모바일", "U+유모바일", "미디어로그 알뜰폰"], 3, "미디어로그")
-    ], titles, 60)
-
-    # 3. 금융권 DB (60일)
-    collect_news("FIN", [
-        (["리브모바일", "리브엠", "국민은행 알뜰폰", "kb국민은행 알뜰폰"], 5, "KB 리브모바일"),
-        (["우리원모바일", "우리은행 알뜰폰"], 3, "우리원모바일"),
-        (["토스 모바일 알뜰폰"], 5, "토스모바일")
-    ], titles, 60)
-
-    # 4. 중소 (60일)
-    collect_news("SMALL", [
-        (["아이즈모바일"], 3, "아이즈모바일"),
-        (["인스모바일"], 3, "인스모바일"),
-        (["프리텔레콤"], 3, "프리텔레콤"),
-        (["에넥스텔레콤", "A모바일"], 3, "에넥스텔레콤"),
-        (["스노우맨"], 3, "스노우맨")
-    ], titles, 60)
+    collect_news("SUBSID", [(["SK텔링크", "7모바일", "세븐모바일"], 10, "SK텔링크"), (["KT M모바일"], 5, "KT M모바일"), (["LG헬로비전"], 5, "LG헬로비전"), (["유모바일"], 5, "미디어로그")], titles, 60)
+    collect_news("MNO", [(["SK텔레콤", "SKT"], 20, "SKT"), (["KT", "케이티"], 10, "KT"), (["LG유플러스"], 10, "LG U+"), (["통신사"], 5, "통신 3사")], titles, 1)
+    collect_news("FIN", [(["리브모바일", "리브엠"], 5, "KB 리브모바일"), (["우리원모바일"], 5, "우리원모바일"), (["토스모바일"], 5, "토스모바일")], titles, 60)
+    collect_news("SMALL", [(["아이즈모바일", "인스모바일", "프리텔레콤", "에넥스텔레콤"], 5, "중소 알뜰폰")], titles, 60)
