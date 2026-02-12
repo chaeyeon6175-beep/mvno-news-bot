@@ -28,10 +28,23 @@ def clear_notion_database(db_id):
             pages = res.json().get("results", [])
             for page in pages:
                 requests.patch(f"https://api.notion.com/v1/pages/{page['id']}", headers=HEADERS, json={"archived": True})
-            print(f"🗑️ DB 초기화 완료: {target_id[:5]}")
     except: pass
 
-def post_notion(db_id, title, link, tag, pub_date):
+def get_smart_tags(title):
+    """제목 분석을 통한 정밀 다중 태그 추출"""
+    t = title.lower().replace(' ', '')
+    tags = []
+    if any(x in t for x in ["통신3사", "이통3사", "이통사", "통신사공통"]): tags.append("통신 3사")
+    if any(x in t for x in ["sk텔레콤", "skt"]): tags.append("SKT")
+    if any(x in t for x in ["kt", "케이티"]): tags.append("KT")
+    if any(x in t for x in ["lg유플러스", "lgu+", "엘지유플러스"]): tags.append("LG U+")
+    if any(x in t for x in ["sk텔링크", "7모바일", "세븐모바일"]): tags.append("SK텔링크")
+    if any(x in t for x in ["ktm모바일", "kt엠모바일"]): tags.append("KT M모바일")
+    if any(x in t for x in ["리브모바일", "리브m", "토스모바일", "금융권"]): tags.append("금융권")
+    if not tags: tags.append("알뜰폰 일반")
+    return [{"name": tag} for tag in tags]
+
+def post_notion(db_id, title, link, tags, pub_date):
     if not db_id: return False
     target_id = re.sub(r'[^a-fA-F0-9]', '', db_id)
     data = {
@@ -40,7 +53,7 @@ def post_notion(db_id, title, link, tag, pub_date):
             "제목": {"title": [{"text": {"content": title}}]},
             "날짜": {"rich_text": [{"text": {"content": pub_date}}]},
             "링크": {"url": link},
-            "분류": {"multi_select": [{"name": tag}]}
+            "분류": {"multi_select": tags}
         }
     }
     res = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
@@ -51,60 +64,64 @@ def collect(db_key, configs, days):
     if not db_id: return
     
     allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days + 1)]
-    print(f"\n🔍 {db_key} 수집 시작 (날짜 범위: {allowed_dates[-1]} ~ {allowed_dates[0]})")
+    print(f"\n🔍 {db_key} 데이터베이스 수집 중...")
 
-    for keywords, limit, tag in configs:
-        # [수정] 따옴표를 제거하여 검색 유연성 확보
-        query = " ".join(keywords) 
+    for keywords, limit, default_tag in configs:
+        # 키워드별 상한선 12개 제한 (기존 설정값이 12보다 크면 12로 고정)
+        real_limit = min(limit, 12)
+        query = " ".join(keywords)
         
-        url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort=sim" # 관련도순으로 우선 변경
-        res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
-        
-        if res.status_code != 200:
-            print(f"   ❌ API 에러: {res.status_code}")
-            continue
-
-        items = res.json().get('items', [])
-        print(f"   ㄴ '{tag}' 검색어 '{query}' -> {len(items)}개 발견")
+        # 최신순과 관련도순을 조합하여 데이터 확보
+        items = []
+        for sort_type in ["date", "sim"]:
+            url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort={sort_type}"
+            res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
+            if res.status_code == 200:
+                items.extend(res.json().get('items', []))
+            if len(items) > 0: break
 
         count = 0
         for item in items:
             p_date = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S +0900').strftime('%Y-%m-%d')
             title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
             
-            # 날짜 필터 (금융/중소는 최소 2개 보장)
-            if p_date in allowed_dates or (db_key in ["FIN", "SMALL"] and count < 2):
-                if post_notion(db_id, title, item['link'], tag, p_date):
-                    count += 1
-                    print(f"      ✅ 등록: {title[:20]}...")
+            # [수정] 자회사(SUBSID), 금융(FIN), 중소(SMALL)는 기사가 없으면 날짜 무시하고 최소 2개 보장
+            is_min_guaranteed = (db_key in ["SUBSID", "FIN", "SMALL"]) and (count < 2)
             
-            if count >= limit: break
+            if p_date in allowed_dates or is_min_guaranteed:
+                smart_tags = get_smart_tags(title)
+                if post_notion(db_id, title, item['link'], smart_tags, p_date):
+                    count += 1
+                    print(f"      ✅ [{default_tag}] 등록: {title[:20]}... ({p_date})")
+            
+            if count >= real_limit: break
         
         if count == 0:
-            print(f"   ⚠️ '{tag}' 조건에 맞는 최신 기사가 없습니다.")
+            print(f"   ⚠️ {default_tag}: 조건에 맞는 기사가 없습니다.")
 
 if __name__ == "__main__":
-    # API 키 확인
-    if not NAVER_ID or not NAVER_SECRET:
-        print("❌ 네이버 API 키 누락")
+    if not NAVER_ID:
+        print("❌ 네이버 API 키를 확인하세요.")
     else:
         for k in DB_IDS: clear_notion_database(DB_IDS[k])
         
-        # 1. SUBSID (60일)
+        # 1. 자회사 (60일 범위, 최소 2개 보장, 최대 12개)
         collect("SUBSID", [
-            (["SK텔링크"], 10, "SK텔링크"),
-            (["KT M모바일"], 5, "KT M모바일")
+            (["SK텔링크", "7모바일", "세븐모바일"], 12, "SK텔링크"),
+            (["KT M모바일", "KT엠모바일"], 12, "KT M모바일"),
+            (["헬로모바일", "LG헬로비전"], 12, "LG헬로비전")
         ], 60)
 
-        # 2. MNO (7일) - SKT 10개 이상 목표
+        # 2. MNO (7일 범위, 최대 12개)
         collect("MNO", [
-            (["SK텔레콤", "SKT"], 15, "SKT"),
-            (["KT"], 10, "KT"),
-            (["LG유플러스"], 10, "LG U+")
+            (["SK텔레콤", "SKT"], 12, "SKT"),
+            (["KT", "케이티"], 12, "KT"),
+            (["LG유플러스", "LGU+"], 12, "LG U+"),
+            (["통신3사", "이통3사", "통신사"], 12, "통신 3사")
         ], 7)
 
-        # 3. FIN/SMALL (60일)
-        collect("FIN", [(["리브모바일", "토스모바일"], 5, "금융권")], 60)
-        collect("SMALL", [(["알뜰폰 뉴스"], 5, "중소 알뜰폰")], 60)
+        # 3. 금융/중소 (60일 범위, 최소 2개 보장, 최대 12개)
+        collect("FIN", [(["리브모바일", "토스모바일", "우리원모바일"], 12, "금융권")], 60)
+        collect("SMALL", [(["중소 알뜰폰", "알뜰폰 이벤트"], 12, "중소 알뜰폰")], 60)
 
-    print("\n🏁 작업 완료")
+    print("\n🏁 모든 수집 및 제한 설정 완료")
