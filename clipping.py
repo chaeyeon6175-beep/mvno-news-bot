@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from difflib import SequenceMatcher
 
-# 1. 전역 변수 설정 (최상단에 배치하여 어디서든 접근 가능하게 함)
+# 1. 전역 변수 설정 (GitHub Secrets와 정확히 일치해야 함)
 NAVER_ID = os.environ.get('NAVER_CLIENT_ID')
 NAVER_SECRET = os.environ.get('NAVER_CLIENT_SECRET')
 NOTION_TOKEN = os.environ.get('NOTION_TOKEN')
@@ -20,18 +20,18 @@ HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
-# --- 공통 유틸리티 함수 ---
-
 def clear_notion_database(db_id):
     if not db_id: return
     target_id = re.sub(r'[^a-fA-F0-9]', '', db_id)
     try:
         res = requests.post(f"https://api.notion.com/v1/databases/{target_id}/query", headers=HEADERS)
         if res.status_code == 200:
-            for page in res.json().get("results", []):
+            pages = res.json().get("results", [])
+            for page in pages:
                 requests.patch(f"https://api.notion.com/v1/pages/{page['id']}", headers=HEADERS, json={"archived": True})
-            print(f"🗑️ DB({target_id[:5]}...) 초기화 완료")
-    except: pass
+            print(f"🗑️ DB({target_id[:5]}) 초기화 완료 (삭제된 페이지: {len(pages)}개)")
+    except Exception as e:
+        print(f"❌ 초기화 에러: {e}")
 
 def is_duplicate_by_8_chars(new_title, processed_titles):
     t1 = re.sub(r'[^가-힣a-zA-Z0-9]', '', new_title)
@@ -64,7 +64,9 @@ def post_notion(db_id, title, link, img, tag, pub_date, content=""):
     }
     if content:
         data["children"] = [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": content}}]}}]
-    return requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data).status_code == 200
+    
+    res = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
+    return res.status_code == 200
 
 def classify_mno_precision(title):
     t_clean = re.sub(r'\s+', '', title).lower()
@@ -80,12 +82,14 @@ def classify_mno_precision(title):
     if (sum([h_skt, h_kt, h_lg]) >= 2) or any(k in t_clean for k in ["통신3사", "이통3사", "이통사", "통신사"]): return "통신 3사"
     return None
 
-# --- 뉴스 수집 함수 ---
-
 def collect_news(db_key, configs, processed_titles, days_range):
     db_id = DB_IDS.get(db_key)
-    if not db_id: return
+    if not db_id:
+        print(f"⚠️ {db_key}용 DB_ID가 설정되지 않았습니다.")
+        return
+    
     allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days_range + 1)]
+    print(f"\n--- {db_key} DB 수집 시작 (허용 날짜: {allowed_dates[0]} ~ {allowed_dates[-1]}) ---")
 
     for keywords, limit, tag in configs:
         query = " | ".join([f"\"{k}\"" for k in keywords]) if keywords else "알뜰폰"
@@ -98,6 +102,8 @@ def collect_news(db_key, configs, processed_titles, days_range):
             if res.status_code == 200:
                 items = res.json().get('items', [])
                 if items: break
+            else:
+                print(f"❌ 네이버 API 에러: {res.status_code}")
 
         count = 0
         for item in items:
@@ -108,6 +114,7 @@ def collect_news(db_key, configs, processed_titles, days_range):
 
             if is_duplicate_by_8_chars(title, processed_titles): continue
 
+            # 분류 및 필터
             if db_key == "MNO":
                 mno_check = classify_mno_precision(title)
                 if mno_check != tag: continue
@@ -117,46 +124,45 @@ def collect_news(db_key, configs, processed_titles, days_range):
                 if classify_mno_precision(title) is not None: continue
                 final_tag, content_to_send = tag, (desc if "SK텔링크" in tag else "")
 
-            # 기간 조건 + 금융/중소 최소 2개 보장
+            # 강제 수집 조건: 금융/중소는 무조건 2개 채우기, 나머지는 날짜 준수
             if (db_key in ["FIN", "SMALL"] and count < 2) or (p_date in allowed_dates):
                 if post_notion(db_id, title, item['link'], validate_link(item['link']), final_tag, p_date, content_to_send):
                     processed_titles.add(title)
                     count += 1
-                    print(f"✅ [{final_tag}] {p_date} 수집 성공")
+                    print(f"✅ [{final_tag}] {p_date} 등록: {title[:20]}...")
+            
             if count >= limit: break
-
-# --- 실행 메인 로직 ---
+        
+        if count == 0:
+            print(f"🔎 {tag} 태그로 수집된 기사가 없습니다.")
 
 if __name__ == "__main__":
-    # 1. 초기화 (DB_IDS가 상단에 정의되어 있어 이제 에러가 나지 않음)
-    for k in DB_IDS: 
-        if DB_IDS[k]: clear_notion_database(DB_IDS[k])
+    print(f"⏰ 실행 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # 1. 초기화
+    for k in DB_IDS:
+        clear_notion_database(DB_IDS[k])
     
     titles = set()
     
-    # 2. 자회사 (60일 범위, SK텔링크 우선 수집)
+    # 2. 수집 순서 및 설정
+    # SUBSID: 60일 (SK텔링크 최우선)
     collect_news("SUBSID", [
-        (["SK텔링크", "7모바일", "세븐모바일", "에스케이텔링크"], 10, "SK텔링크"),
-        (["KT M모바일", "KT엠모바일"], 5, "KT M모바일"),
-        (["LG헬로비전", "헬로모바일"], 5, "LG헬로비전"),
-        (["유모바일", "U+유모바일"], 5, "미디어로그")
+        (["SK텔링크", "7모바일", "세븐모바일"], 10, "SK텔링크"),
+        (["KT M모바일"], 5, "KT M모바일"),
+        (["LG헬로비전", "헬로모바일"], 5, "LG헬로비전")
     ], titles, 60)
     
-    # 3. MNO (3일 범위로 소폭 확대하여 SKT 10개 확보 보장)
+    # MNO: 7일로 대폭 확대 (SKT 10개 이상 확실히 채우기 위함)
     collect_news("MNO", [
         (["SK텔레콤", "SKT"], 20, "SKT"),
         (["KT", "케이티"], 10, "KT"),
-        (["LG유플러스", "LGU+"], 10, "LG U+"),
-        (["통신사", "이통사"], 5, "통신 3사")
-    ], titles, 3)
+        (["LG유플러스"], 10, "LG U+"),
+        (["통신사", "이통사"], 10, "통신 3사")
+    ], titles, 7)
     
-    # 4. 금융/중소 (60일 범위, 기사 없을 시 최소 2개 출력)
-    collect_news("FIN", [
-        (["리브모바일", "리브엠"], 5, "KB 리브모바일"),
-        (["우리원모바일"], 5, "우리원모바일"),
-        (["토스모바일"], 5, "토스모바일")
-    ], titles, 60)
-    
-    collect_news("SMALL", [
-        (["아이즈모바일", "인스모바일", "프리텔레콤", "에넥스텔레콤", "A모바일"], 5, "중소 알뜰폰")
-    ], titles, 60)
+    # FIN/SMALL: 60일 (없으면 과거 기사라도 2개 강제 수집)
+    collect_news("FIN", [(["리브모바일", "리브엠", "토스모바일"], 5, "금융권")], titles, 60)
+    collect_news("SMALL", [(["알뜰폰"], 5, "중소 알뜰폰")], titles, 60)
+
+    print("\n🚀 모든 수집 작업이 종료되었습니다.")
