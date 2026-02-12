@@ -1,16 +1,19 @@
-name: News Clipping Automation
+name: Daily News Clipping
 
 on:
   schedule:
-    # 한국 시간(KST) 오전 10시 = UTC 01:00
-    - cron: '0 1 * * *'
-  workflow_dispatch: # 이 구문이 있어야 'Run workflow' 버튼이 생깁니다.
+    # 매일 한국 시간 아침 9시 (UTC 00:00) 실행
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # 필요할 때 수동으로도 실행 가능하게 설정
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -18,10 +21,12 @@ jobs:
           python-version: '3.9'
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4
+        run: |
+          pip install requests
 
-      - name: Run news clipping script
+      - name: Run Clipping Script
         env:
+          # 깃허브 레포지토리 Settings > Secrets에 저장한 변수들
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -29,4 +34,4 @@ jobs:
           DB_ID_SUBSID: ${{ secrets.DB_ID_SUBSID }}
           DB_ID_FIN: ${{ secrets.DB_ID_FIN }}
           DB_ID_SMALL: ${{ secrets.DB_ID_SMALL }}
-        run: python clipping.py
+        run: python your_script_name.py  # 실행할 파이썬 파일명으로 수정하세요
