@@ -2,10 +2,8 @@ name: Daily News Clipping
 
 on:
   schedule:
-    # 매일 한국 시간 아침 9시 (UTC 00:00) 실행
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *' # 매일 아침 9시(한국)
   workflow_dispatch:
-    # 수동 실행 가능
 
 jobs:
   build:
@@ -26,7 +24,6 @@ jobs:
 
       - name: Run Clipping Script
         env:
-          # Settings > Secrets에 등록한 이름과 일치해야 합니다
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -34,5 +31,8 @@ jobs:
           DB_ID_SUBSID: ${{ secrets.DB_ID_SUBSID }}
           DB_ID_FIN: ${{ secrets.DB_ID_FIN }}
           DB_ID_SMALL: ${{ secrets.DB_ID_SMALL }}
-        # ⚠️ 파이썬 파일명이 main.py가 아니라면 아래 파일명을 변경하세요
-        run: python main.py
+        # 폴더 내의 .py 파일을 자동으로 찾아서 실행 (파일명이 main.py가 아니어도 작동함)
+        run: |
+          PYTHON_FILE=$(ls *.py | head -n 1)
+          echo "실행할 파일: $PYTHON_FILE"
+          python "$PYTHON_FILE"
