@@ -92,4 +92,80 @@ def collect_mno(days=7):
         print("⚠️ 오늘 이미 1번 DB 수집이 완료되었습니다.")
         return
 
-    allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days +
+    allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days + 1)]
+    mno_seen_urls = set()
+    mno_seen_titles = []
+    mno_tag_counts = {"통신 3사": 0, "SKT": 0, "KT": 0, "LG U+": 0}
+
+    configs = [
+        (["통신3사", "통신업계"], "통신 3사"),
+        (["SK텔레콤", "SKT"], "SKT"),
+        (["KT", "케이티"], "KT"),
+        (["LG유플러스", "LGU+"], "LG U+")
+    ]
+
+    for keywords, target_tag in configs:
+        query = " ".join(keywords)
+        raw_items = []
+        for sort in ["date", "sim"]:
+            url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort={sort}"
+            res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
+            if res.status_code == 200: raw_items.extend(res.json().get('items', []))
+
+        unique_items = []
+        _tmp = set()
+        for i in raw_items:
+            if i['link'] not in _tmp: unique_items.append(i); _tmp.add(i['link'])
+
+        for item in unique_items:
+            if mno_tag_counts[target_tag] >= 12: break
+            if item['link'] in mno_seen_urls: continue 
+
+            title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
+            if any(get_similarity(title, st) > 0.45 for st in mno_seen_titles): continue
+
+            tags = get_final_tags(title, "MNO", target_tag)
+            if tags and tags[0]['name'] == target_tag:
+                p_date = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S +0900').strftime('%Y-%m-%d')
+                if p_date in allowed_dates:
+                    if post_notion(db_id, title, item['link'], tags, p_date):
+                        mno_seen_urls.add(item['link'])
+                        mno_seen_titles.append(title)
+                        mno_tag_counts[target_tag] += 1
+
+# --- 2,3,4번 DB 전용 수집 (기존 방식 절대 유지) ---
+def collect_others(db_key, configs, days):
+    db_id = DB_IDS.get(db_key)
+    allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days + 1)]
+    
+    for keywords, limit, default_tag in configs:
+        tag_count = 0
+        seen_urls = set()
+        query = " ".join(keywords)
+        # 2,3,4번은 기존처럼 '알뜰폰' 등을 포함한 키워드로 수집
+        url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort=date"
+        res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
+        if res.status_code != 200: continue
+        
+        for item in res.json().get('items', []):
+            if tag_count >= 12: break
+            title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
+            tags = get_final_tags(title, db_key, default_tag)
+            # 업체명이 제목에 포함된 경우에만 출력하는 로직 유지
+            if tags:
+                p_date = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S +0900').strftime('%Y-%m-%d')
+                if p_date in allowed_dates or tag_count < 2:
+                    if post_notion(db_id, title, item['link'], tags, p_date):
+                        tag_count += 1
+
+if __name__ == "__main__":
+    # 1. 1번 데이터베이스: 1주일 제한 + 깃허브 중복 방지 적용
+    collect_mno(days=7)
+
+    # 2, 3, 4. 데이터베이스: 기존 로직 그대로 유지
+    collect_others("SUBSID", [
+        (["SK텔링크"], 12, "SK텔링크"), (["KT엠모바일"], 12, "KT M모바일"),
+        (["LG헬로비전"], 12, "LG헬로비전"), (["스카이라이프"], 12, "KT스카이라이프"), (["미디어로그"], 12, "미디어로그")
+    ], 60)
+    collect_others("FIN", [(["토스모바일"], 12, "토스모바일"), (["리브모바일"], 12, "KB리브모바일"), (["우리원모바일"], 12, "우리원모바일")], 30)
+    collect_others("SMALL", [(["아이즈모바일"], 12, "아이즈모바일"), (["프리텔레콤"], 12, "프리모바일"), (["에넥스텔레콤"], 12, "에넥스텔레콤"), (["유니컴즈"], 12, "유니컴즈"), (["인스코비"], 12, "인스코비"), (["세종텔레콤"], 12, "세종텔레콤"), (["큰사람"], 12, "큰사람")], 60)
