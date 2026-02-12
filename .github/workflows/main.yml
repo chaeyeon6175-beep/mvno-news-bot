@@ -5,7 +5,7 @@ on:
     # 매일 한국 시간 아침 9시 (UTC 00:00) 실행
     - cron: '0 0 * * *'
   workflow_dispatch:
-    # 필요할 때 수동으로도 실행 가능하게 설정
+    # 수동 실행 가능
 
 jobs:
   build:
@@ -26,7 +26,7 @@ jobs:
 
       - name: Run Clipping Script
         env:
-          # 깃허브 레포지토리 Settings > Secrets에 저장한 변수들
+          # Settings > Secrets에 등록한 이름과 일치해야 합니다
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -34,4 +34,5 @@ jobs:
           DB_ID_SUBSID: ${{ secrets.DB_ID_SUBSID }}
           DB_ID_FIN: ${{ secrets.DB_ID_FIN }}
           DB_ID_SMALL: ${{ secrets.DB_ID_SMALL }}
-        run: python your_script_name.py  # 실행할 파이썬 파일명으로 수정하세요
+        # ⚠️ 파이썬 파일명이 main.py가 아니라면 아래 파일명을 변경하세요
+        run: python main.py
