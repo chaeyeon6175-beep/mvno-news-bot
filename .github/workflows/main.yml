@@ -2,13 +2,18 @@ name: Daily News Clipping
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 매일 아침 9시(한국)
-  workflow_dispatch:
+    # 한국 시간(KST) 오전 9시 = UTC 00:00
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 수동 실행 버튼 활성화
+
+# 동일한 작업이 중복 실행될 경우 이전 작업을 취소함
+concurrency:
+  group: news-clipping
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -19,10 +24,9 @@ jobs:
           python-version: '3.9'
 
       - name: Install dependencies
-        run: |
-          pip install requests
+        run: pip install requests
 
-      - name: Run Clipping Script
+      - name: Run Script
         env:
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
@@ -31,8 +35,5 @@ jobs:
           DB_ID_SUBSID: ${{ secrets.DB_ID_SUBSID }}
           DB_ID_FIN: ${{ secrets.DB_ID_FIN }}
           DB_ID_SMALL: ${{ secrets.DB_ID_SMALL }}
-        # 폴더 내의 .py 파일을 자동으로 찾아서 실행 (파일명이 main.py가 아니어도 작동함)
-        run: |
-          PYTHON_FILE=$(ls *.py | head -n 1)
-          echo "실행할 파일: $PYTHON_FILE"
-          python "$PYTHON_FILE"
+        # 파일명을 main.py로 저장했다면 아래 그대로 사용
+        run: python main.py
