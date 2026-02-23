@@ -19,17 +19,30 @@ HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
+def clear_database(db_id):
+    """[추가] 수집 전 해당 데이터베이스의 기존 기사들을 모두 삭제(아카이브)"""
+    print(f"🧹 데이터베이스 비우기 시작: {db_id}")
+    query_url = f"https://api.notion.com/v1/databases/{db_id}/query"
+    
+    while True:
+        res = requests.post(query_url, headers=HEADERS)
+        if res.status_code != 200: break
+        results = res.json().get("results", [])
+        if not results: break
+        
+        for page in results:
+            page_id = page["id"]
+            update_url = f"https://api.notion.com/v1/pages/{page_id}"
+            requests.patch(update_url, headers=HEADERS, json={"archived": True})
+        
+        # 데이터가 많을 경우 반복 (한 번에 최대 100개 조회됨)
+        if not res.json().get("has_more"): break
+    print(f"✨ 비우기 완료.")
+
 def get_similarity(a, b):
     a = re.sub(r'[^가-힣a-zA-Z0-9]', '', a)
     b = re.sub(r'[^가-힣a-zA-Z0-9]', '', b)
     return SequenceMatcher(None, a, b).ratio()
-
-def check_already_collected(db_id):
-    today = datetime.now().strftime('%Y-%m-%d')
-    url = f"https://api.notion.com/v1/databases/{db_id}/query"
-    filter_data = {"filter": {"property": "날짜", "rich_text": {"equals": today}}, "page_size": 1}
-    res = requests.post(url, headers=HEADERS, json=filter_data)
-    return len(res.json().get('results', [])) > 0 if res.status_code == 200 else False
 
 def is_telecom_news(title):
     t = title.lower().replace(' ', '')
@@ -73,16 +86,13 @@ def post_notion(db_id, title, link, tags, pub_date):
     res = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
     return res.status_code == 200
 
-# --- 1번 DB 수집 (개별 사 선점 + 총 30개 제한) ---
 def collect_mno(days=7):
     db_id = DB_IDS.get("MNO")
-    if check_already_collected(db_id):
-        print("⚠️ 오늘 이미 1번 DB 수집 완료")
-        return
-
+    clear_database(db_id) # 수집 전 기존 데이터 삭제
+    
     allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days + 1)]
     mno_seen_urls, mno_seen_titles = set(), []
-    total_count = 0  # DB 전체 카운트
+    total_count = 0
 
     configs = [
         (["SK텔레콤", "SKT"], "SKT"), (["KT", "케이티"], "KT"),
@@ -90,7 +100,7 @@ def collect_mno(days=7):
     ]
 
     for keywords, target_tag in configs:
-        if total_count >= 30: break # 전체 30개 넘으면 종료
+        if total_count >= 30: break
         tag_count = 0
         query = " ".join(keywords)
         for sort in ["sim", "date"]:
@@ -98,13 +108,11 @@ def collect_mno(days=7):
             url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort={sort}"
             res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
             if res.status_code != 200: continue
-            
             for item in res.json().get('items', []):
                 if total_count >= 30 or tag_count >= 12: break
                 if item['link'] in mno_seen_urls: continue
                 title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
                 if any(get_similarity(title, st) > 0.45 for st in mno_seen_titles): continue
-                
                 tags = get_final_tags(title, "MNO", target_tag)
                 if tags and tags[0]['name'] == target_tag:
                     p_date = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S +0900').strftime('%Y-%m-%d')
@@ -114,14 +122,13 @@ def collect_mno(days=7):
                             mno_seen_titles.append(title)
                             tag_count += 1
                             total_count += 1
-    print(f"✅ MNO 수집 종료 (총 {total_count}개)")
 
-# --- 2,3,4번 DB 수집 (총 30개 제한 유지) ---
 def collect_others(db_key, configs, days):
     db_id = DB_IDS.get(db_key)
+    clear_database(db_id) # 수집 전 기존 데이터 삭제
+    
     allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days + 1)]
     total_count = 0
-    
     for keywords, limit, default_tag in configs:
         if total_count >= 30: break
         tag_count = 0
@@ -129,7 +136,6 @@ def collect_others(db_key, configs, days):
         url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort=date"
         res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
         if res.status_code != 200: continue
-        
         for item in res.json().get('items', []):
             if total_count >= 30 or tag_count >= 12: break
             title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
@@ -140,9 +146,9 @@ def collect_others(db_key, configs, days):
                     if post_notion(db_id, title, item['link'], tags, p_date):
                         tag_count += 1
                         total_count += 1
-    print(f"✅ {db_key} 수집 종료 (총 {total_count}개)")
 
 if __name__ == "__main__":
+    # 각 DB별로 비우고 새로 수집 시작
     collect_mno(days=7)
     collect_others("SUBSID", [(["SK텔링크"], 12, "SK텔링크"), (["KT엠모바일"], 12, "KT M모바일"), (["LG헬로비전"], 12, "LG헬로비전"), (["스카이라이프"], 12, "KT스카이라이프"), (["미디어로그"], 12, "미디어로그")], 60)
     collect_others("FIN", [(["토스모바일"], 12, "토스모바일"), (["리브모바일"], 12, "KB리브모바일"), (["우리원모바일"], 12, "우리원모바일")], 30)
