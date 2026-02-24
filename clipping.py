@@ -20,28 +20,19 @@ HEADERS = {
 }
 
 def clear_database(db_id):
-    """[추가] 수집 전 해당 데이터베이스의 기존 기사들을 모두 삭제(아카이브)"""
-    print(f"🧹 데이터베이스 비우기 시작: {db_id}")
+    """수집 전 기존 기사 삭제"""
+    print(f"🧹 데이터베이스 비우기: {db_id}")
     query_url = f"https://api.notion.com/v1/databases/{db_id}/query"
-    
     while True:
         res = requests.post(query_url, headers=HEADERS)
-        if res.status_code != 200: break
         results = res.json().get("results", [])
         if not results: break
-        
         for page in results:
-            page_id = page["id"]
-            update_url = f"https://api.notion.com/v1/pages/{page_id}"
-            requests.patch(update_url, headers=HEADERS, json={"archived": True})
-        
-        # 데이터가 많을 경우 반복 (한 번에 최대 100개 조회됨)
+            requests.patch(f"https://api.notion.com/v1/pages/{page['id']}", headers=HEADERS, json={"archived": True})
         if not res.json().get("has_more"): break
-    print(f"✨ 비우기 완료.")
 
 def get_similarity(a, b):
-    a = re.sub(r'[^가-힣a-zA-Z0-9]', '', a)
-    b = re.sub(r'[^가-힣a-zA-Z0-9]', '', b)
+    a = re.sub(r'[^가-힣a-zA-Z0-9]', '', a); b = re.sub(r'[^가-힣a-zA-Z0-9]', '', b)
     return SequenceMatcher(None, a, b).ratio()
 
 def is_telecom_news(title):
@@ -74,82 +65,69 @@ def get_final_tags(title, db_key, default_tag):
 
 def post_notion(db_id, title, link, tags, pub_date):
     target_id = re.sub(r'[^a-fA-F0-9]', '', db_id)
-    data = {
-        "parent": {"database_id": target_id},
-        "properties": {
-            "제목": {"title": [{"text": {"content": title, "link": {"url": link}}}]},
-            "날짜": {"rich_text": [{"text": {"content": pub_date}}]},
-            "링크": {"url": link},
-            "분류": {"multi_select": tags}
-        }
-    }
+    data = {"parent": {"database_id": target_id}, "properties": {"제목": {"title": [{"text": {"content": title, "link": {"url": link}}}]}, "날짜": {"rich_text": [{"text": {"content": pub_date}}]}, "링크": {"url": link}, "분류": {"multi_select": tags}}}
     res = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=data)
     return res.status_code == 200
 
-def collect_mno(days=7):
-    db_id = DB_IDS.get("MNO")
-    clear_database(db_id) # 수집 전 기존 데이터 삭제
+def collect_news(db_key, configs, default_days=7):
+    """통합 수집 로직: 분류별 최소 5개, 최대 15개"""
+    db_id = DB_IDS.get(db_key)
+    clear_database(db_id)
     
-    allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days + 1)]
-    mno_seen_urls, mno_seen_titles = set(), []
-    total_count = 0
+    seen_urls, seen_titles = set(), []
+    # 7일(MNO용) 또는 60일(알뜰폰용) 날짜 리스트 생성
+    allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(default_days + 1)]
 
-    configs = [
-        (["SK텔레콤", "SKT"], "SKT"), (["KT", "케이티"], "KT"),
-        (["LG유플러스", "LGU+"], "LG U+"), (["통신3사", "통신업계"], "통신 3사")
-    ]
-
-    for keywords, target_tag in configs:
-        if total_count >= 30: break
+    for keywords, _, target_tag in configs:
         tag_count = 0
-        query = " ".join(keywords)
+        print(f"📡 {db_key} - {target_tag} 수집 중...")
+        
         for sort in ["sim", "date"]:
-            if total_count >= 30 or tag_count >= 12: break
+            if tag_count >= 15: break
+            query = " ".join(keywords)
             url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort={sort}"
             res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
             if res.status_code != 200: continue
+
             for item in res.json().get('items', []):
-                if total_count >= 30 or tag_count >= 12: break
-                if item['link'] in mno_seen_urls: continue
+                if tag_count >= 15: break
+                if item['link'] in seen_urls: continue
+                
                 title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
-                if any(get_similarity(title, st) > 0.45 for st in mno_seen_titles): continue
-                tags = get_final_tags(title, "MNO", target_tag)
+                if any(get_similarity(title, st) > 0.45 for st in seen_titles): continue
+
+                tags = get_final_tags(title, db_key, target_tag)
                 if tags and tags[0]['name'] == target_tag:
                     p_date = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S +0900').strftime('%Y-%m-%d')
-                    if p_date in allowed_dates:
+                    
+                    # [로직] 7일 이내 기사거나, 혹은 아직 최소 5개를 못 채웠다면 과거 기사라도 수집
+                    if p_date in allowed_dates or tag_count < 5:
                         if post_notion(db_id, title, item['link'], tags, p_date):
-                            mno_seen_urls.add(item['link'])
-                            mno_seen_titles.append(title)
+                            seen_urls.add(item['link'])
+                            seen_titles.append(title)
                             tag_count += 1
-                            total_count += 1
-
-def collect_others(db_key, configs, days):
-    db_id = DB_IDS.get(db_key)
-    clear_database(db_id) # 수집 전 기존 데이터 삭제
-    
-    allowed_dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days + 1)]
-    total_count = 0
-    for keywords, limit, default_tag in configs:
-        if total_count >= 30: break
-        tag_count = 0
-        query = " ".join(keywords)
-        url = f"https://openapi.naver.com/v1/search/news.json?query={query}&display=100&sort=date"
-        res = requests.get(url, headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET})
-        if res.status_code != 200: continue
-        for item in res.json().get('items', []):
-            if total_count >= 30 or tag_count >= 12: break
-            title = item['title'].replace('<b>','').replace('</b>','').replace('&quot;','"')
-            tags = get_final_tags(title, db_key, default_tag)
-            if tags:
-                p_date = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S +0900').strftime('%Y-%m-%d')
-                if p_date in allowed_dates or tag_count < 2:
-                    if post_notion(db_id, title, item['link'], tags, p_date):
-                        tag_count += 1
-                        total_count += 1
+        print(f"✅ {target_tag}: {tag_count}개 수집됨")
 
 if __name__ == "__main__":
-    # 각 DB별로 비우고 새로 수집 시작
-    collect_mno(days=7)
-    collect_others("SUBSID", [(["SK텔링크"], 12, "SK텔링크"), (["KT엠모바일"], 12, "KT M모바일"), (["LG헬로비전"], 12, "LG헬로비전"), (["스카이라이프"], 12, "KT스카이라이프"), (["미디어로그"], 12, "미디어로그")], 60)
-    collect_others("FIN", [(["토스모바일"], 12, "토스모바일"), (["리브모바일"], 12, "KB리브모바일"), (["우리원모바일"], 12, "우리원모바일")], 30)
-    collect_others("SMALL", [(["아이즈모바일"], 12, "아이즈모바일"), (["프리텔레콤"], 12, "프리모바일"), (["에넥스텔레콤"], 12, "에넥스텔레콤"), (["유니컴즈"], 12, "유니컴즈"), (["인스코비"], 12, "인스코비"), (["세종텔레콤"], 12, "세종텔레콤"), (["큰사람"], 12, "큰사람")], 60)
+    # 1. MNO (기본 7일 기준)
+    collect_news("MNO", [
+        (["SK텔레콤", "SKT"], 15, "SKT"), (["KT", "케이티"], 15, "KT"),
+        (["LG유플러스", "LGU+"], 15, "LG U+"), (["통신3사", "통신업계"], 15, "통신 3사")
+    ], 7)
+
+    # 2. SUBSID (기본 60일 기준)
+    collect_news("SUBSID", [
+        (["SK텔링크"], 15, "SK텔링크"), (["KT엠모바일"], 15, "KT M모바일"),
+        (["LG헬로비전"], 15, "LG헬로비전"), (["스카이라이프"], 15, "KT스카이라이프"), (["미디어로그"], 15, "미디어로그")
+    ], 60)
+
+    # 3. FIN (기본 30일 기준)
+    collect_news("FIN", [
+        (["토스모바일"], 15, "토스모바일"), (["리브모바일"], 15, "KB리브모바일"), (["우리원모바일"], 15, "우리원모바일")
+    ], 30)
+
+    # 4. SMALL (기본 60일 기준)
+    collect_news("SMALL", [
+        (["아이즈모바일"], 15, "아이즈모바일"), (["프리텔레콤"], 15, "프리모바일"), (["에넥스텔레콤"], 15, "에넥스텔레콤"), 
+        (["유니컴즈"], 15, "유니컴즈"), (["인스코비"], 15, "인스코비"), (["세종텔레콤"], 15, "세종텔레콤"), (["큰사람"], 15, "큰사람")
+    ], 60)
