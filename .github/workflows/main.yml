@@ -2,14 +2,8 @@ name: Daily News Clipping
 
 on:
   schedule:
-    # 한국 시간(KST) 오전 9시 = UTC 00:00
-    - cron: '0 0 * * *'
-  workflow_dispatch: # 수동 실행 버튼 활성화
-
-# 동일한 작업이 중복 실행될 경우 이전 작업을 취소함
-concurrency:
-  group: news-clipping
-  cancel-in-progress: true
+    - cron: '0 0 * * *' # 매일 아침 9시(한국 시간)
+  workflow_dispatch: # 수동 실행 버튼
 
 jobs:
   build:
@@ -35,5 +29,12 @@ jobs:
           DB_ID_SUBSID: ${{ secrets.DB_ID_SUBSID }}
           DB_ID_FIN: ${{ secrets.DB_ID_FIN }}
           DB_ID_SMALL: ${{ secrets.DB_ID_SMALL }}
-        # 파일명을 main.py로 저장했다면 아래 그대로 사용
-        run: python main.py
+        # [핵심 수정] .py 파일을 자동으로 찾아서 실행합니다.
+        run: |
+          PYTHON_FILE=$(find . -maxdepth 1 -name "*.py" | head -n 1)
+          if [ -z "$PYTHON_FILE" ]; then
+            echo "❌ 에러: 파이썬 파일을 찾을 수 없습니다. 레포지토리에 .py 파일이 있는지 확인하세요."
+            exit 1
+          fi
+          echo "🚀 실행 중인 파일: $PYTHON_FILE"
+          python "$PYTHON_FILE"
